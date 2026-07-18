@@ -292,6 +292,102 @@ export default function ProviderLimits() {
     }
   }, []);
 
+
+  // Enter Converge pool: ALL keys (not just current page) — separate from card pagination
+  const [enterConvergePool, setEnterConvergePool] = useState(null);
+  const enterConvergePoolBusyRef = useRef(false);
+
+  const refreshEnterConvergePool = useCallback(async () => {
+    if (enterConvergePoolBusyRef.current) return;
+    enterConvergePoolBusyRef.current = true;
+    setEnterConvergePool((prev) =>
+      prev ? { ...prev, loading: true } : { accounts: 0, withData: 0, loading: true, remaining: 0, total: 0, pct: 0 },
+    );
+    try {
+      // page through all enter-converge connections (API max pageSize 500)
+      const allEc = [];
+      let pageNum = 1;
+      let totalPages = 1;
+      do {
+        const params = new URLSearchParams({
+          page: String(pageNum),
+          pageSize: "500",
+          accountStatus: "all",
+          provider: "enter-converge",
+          sort: "priority",
+        });
+        const res = await fetch(`/api/providers/client?${params}`);
+        if (!res.ok) break;
+        const data = await res.json();
+        const list = data.connections || [];
+        allEc.push(...list);
+        totalPages = Math.max(1, Number(data.pagination?.totalPages) || 1);
+        pageNum += 1;
+      } while (pageNum <= totalPages && pageNum <= 20); // hard cap 10k keys
+
+      if (allEc.length === 0) {
+        setEnterConvergePool(null);
+        return;
+      }
+
+      // Fetch usage with limited concurrency (avoid hammering Enter API)
+      const CONCURRENCY = 8;
+      let remaining = 0;
+      let total = 0;
+      let withData = 0;
+      let idx = 0;
+
+      async function worker() {
+        while (idx < allEc.length) {
+          const i = idx++;
+          const conn = allEc[i];
+          try {
+            const r = await fetch(`/api/usage/${conn.id}`);
+            if (!r.ok) continue;
+            const data = await r.json();
+            const parsed = parseQuotaData(conn.provider, data);
+            if (!Array.isArray(parsed) || parsed.length === 0) continue;
+            const row =
+              parsed.find((q) => String(q.name || "").toLowerCase() === "credits") ||
+              parsed[0];
+            if (!row) continue;
+            const rem =
+              row.remaining != null
+                ? Number(row.remaining)
+                : Math.max(0, Number(row.total || 0) - Number(row.used || 0));
+            const tot = Number(row.total || 0);
+            if (!Number.isFinite(rem)) continue;
+            remaining += rem;
+            if (Number.isFinite(tot) && tot > 0) total += tot;
+            withData += 1;
+          } catch {
+            // skip failed key
+          }
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, allEc.length) }, () => worker()),
+      );
+
+      const tot = total > 0 ? total : remaining;
+      const pct = tot > 0 ? Math.round((remaining / tot) * 100) : remaining > 0 ? 100 : 0;
+      setEnterConvergePool({
+        accounts: allEc.length,
+        withData,
+        loading: false,
+        remaining,
+        total: tot,
+        pct,
+      });
+    } catch (e) {
+      console.error("[ProviderLimits] Enter Converge pool refresh failed:", e);
+      setEnterConvergePool((prev) => (prev ? { ...prev, loading: false } : null));
+    } finally {
+      enterConvergePoolBusyRef.current = false;
+    }
+  }, []);
+
   // Refresh quota for a specific provider
   const refreshProvider = useCallback(
     async (connectionId, provider) => {
@@ -491,13 +587,16 @@ export default function ProviderLimits() {
           .map((conn) => fetchQuota(conn.id, conn.provider)),
       );
 
+      // Full Enter Converge pool (all keys, not just this page)
+      void refreshEnterConvergePool();
+
       setLastUpdated(new Date());
     } catch (error) {
       console.error("Error refreshing all providers:", error);
     } finally {
       setRefreshingAll(false);
     }
-  }, [refreshingAll, fetchConnections, fetchQuota, page]);
+  }, [refreshingAll, fetchConnections, fetchQuota, page, refreshEnterConvergePool]);
 
   useEffect(() => {
     const initializeData = async () => {
@@ -517,11 +616,12 @@ export default function ProviderLimits() {
       await Promise.all(
         visibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
       );
+      void refreshEnterConvergePool();
       setLastUpdated(new Date());
     };
 
     initializeData();
-  }, [fetchConnections, fetchQuota, page]);
+  }, [fetchConnections, fetchQuota, page, refreshEnterConvergePool]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1016,6 +1116,52 @@ export default function ProviderLimits() {
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           Expiring-first currently reorders accounts inside the current page.
           Cross-page ordering still follows backend pagination.
+        </div>
+      )}
+
+      {/* Enter Converge pool: total remaining credits across ALL keys (not page) */}
+      {enterConvergePool && (providerFilter === "all" || providerFilter === "enter-converge") && (
+        <div className="rounded-xl border border-indigo-500/25 bg-indigo-500/10 px-4 py-3">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-8 h-8 shrink-0 rounded-md flex items-center justify-center overflow-hidden bg-indigo-500/20 text-indigo-300 text-xs font-bold">
+                EN
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-text-primary">
+                  Enter Converge · Pool
+                </div>
+                <div className="text-xs text-text-muted">
+                  {enterConvergePool.withData}/{enterConvergePool.accounts} keys
+                  {" (all accounts)"}
+                  {enterConvergePool.loading ? " loading..." : ""}
+                </div>
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              <div className="text-sm font-semibold tabular-nums text-text-primary">
+                {enterConvergePool.remaining.toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}{" "}
+                <span className="text-text-muted font-normal">credits left</span>
+              </div>
+              <div className="text-xs text-text-muted tabular-nums">
+                of{" "}
+                {enterConvergePool.total.toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}{" "}
+                · {enterConvergePool.pct}%
+              </div>
+            </div>
+          </div>
+          <div className="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-indigo-500 transition-all"
+              style={{
+                width: `${Math.max(0, Math.min(100, enterConvergePool.pct))}%`,
+              }}
+            />
+          </div>
         </div>
       )}
 
