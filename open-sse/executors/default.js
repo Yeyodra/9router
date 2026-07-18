@@ -7,6 +7,11 @@ import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import {
+  resolveEnterConvergeWorkspaceId,
+  resolveEnterConvergeWorkspaceIdSync,
+  cacheEnterConvergeWorkspaceId,
+} from "../providers/enter-converge-workspace.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -41,6 +46,11 @@ const HEADER_HOOKS = {
   kimiHeaders: (h) => Object.assign(h, buildKimiHeaders()),
   clineHeaders: (h, c) => Object.assign(h, buildClineHeaders(c.apiKey || c.accessToken)),
   kilocodeOrg: (h, c) => { if (c.providerSpecificData?.orgId) h["X-Kilocode-OrganizationID"] = c.providerSpecificData.orgId; },
+  enterConvergeWorkspace: (h, c) => {
+    // Prefer stored providerSpecificData; fall back to warm cache from validate/usage auto-resolve.
+    const ws = resolveEnterConvergeWorkspaceIdSync(c);
+    if (ws) h["X-Workspace-ID"] = ws;
+  },
   claudeOverlay: (h) => {
     const cached = getCachedClaudeHeaders();
     if (!cached) return;
@@ -79,6 +89,29 @@ const REFRESH_GRANTS = Object.fromEntries(
 export class DefaultExecutor extends BaseExecutor {
   constructor(provider) {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
+  }
+
+  // Enter Converge: resolve workspaceId from ek_ when not stored (farm keys only).
+  async execute(args) {
+    if (this.provider === "enter-converge") {
+      const creds = args?.credentials;
+      const apiKey = creds?.apiKey || creds?.accessToken;
+      if (apiKey) {
+        const ws = await resolveEnterConvergeWorkspaceId(
+          apiKey,
+          creds?.providerSpecificData,
+          args?.proxyOptions || null,
+        );
+        if (ws) {
+          cacheEnterConvergeWorkspaceId(apiKey, ws);
+          if (!creds.providerSpecificData) creds.providerSpecificData = {};
+          if (!creds.providerSpecificData.workspaceId) {
+            creds.providerSpecificData.workspaceId = ws;
+          }
+        }
+      }
+    }
+    return super.execute(args);
   }
 
   transformRequest(model, body) {

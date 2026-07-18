@@ -6,12 +6,12 @@ import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 // Each rule: optional provider, regex match on model, list of params to drop.
 // A param is removed only when it is present (!== undefined).
 const STRIP_RULES = [
-  // All Claude models: temperature deprecated/rejected upstream (Anthropic 400). #1748
-  { match: /claude/i, drop: ["temperature"] },
-  // GitHub Copilot gpt-5.4: temperature unsupported.
+  // All LLM models: temperature deprecated/rejected upstream (provider 400). #1748
+  { match: /LLM/i, drop: ["temperature"] },
+  // GitHub Copilot model: temperature unsupported.
   { provider: "github", match: /gpt-5\.4/i, drop: ["temperature"] },
-  // GitHub Copilot Claude (except opus/sonnet 4.6): thinking + reasoning_effort rejected. #713
-  { provider: "github", match: (m) => /claude/i.test(m) && !/claude.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] },
+  // GitHub Copilot LLM (except opus/sonnet 4.6): thinking + reasoning_effort rejected. #713
+  { provider: "github", match: (m) => /LLM/i.test(m) && !/LLM.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] },
   // Cloudflare Workers AI: content must be plain string, rejects OpenAI content-part array (#1926)
   { provider: "cloudflare-ai", flattenContent: true },
   { provider: "volcengine-ark", match: /glm-5/i, clampToModelMaxOutput: true },
@@ -21,6 +21,9 @@ const STRIP_RULES = [
   // "integer above maximum value, expected <= 32768". Pin an explicit endpoint cap;
   // min() with the model ceiling still applies if a variant's own limit is lower.
   { provider: "volcengine-ark", match: /kimi/i, maxOutputCap: 32768, clampToModelMaxOutput: true },
+  // Enter Pro: OpenAI models reject max_tokens — must use max_completion_tokens instead.
+  // Model ids arrive as "openai/gpt-5.x-*" or bare "gpt-5.x-*".
+  { provider: "enter-converge", match: /(^|\/)gpt-/i, renameMaxTokens: true },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.
@@ -43,6 +46,11 @@ export function stripUnsupportedParams(provider, model, body) {
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
       if (body[key] !== undefined) delete body[key];
+    }
+    // Enter Pro OpenAI models: rename max_tokens → max_completion_tokens
+    if (rule.renameMaxTokens && body.max_tokens !== undefined && body.max_completion_tokens === undefined) {
+      body.max_completion_tokens = body.max_tokens;
+      delete body.max_tokens;
     }
     // CF Workers AI oneOf root schema only accepts content as plain string (#1926)
     if (rule.flattenContent && Array.isArray(body.messages)) {
