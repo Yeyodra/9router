@@ -252,6 +252,42 @@ export async function POST(request) {
       }
 
       switch (provider) {
+        case "enter-converge": {
+          // Farm keys are ek_ only — auto-resolve workspace via GET /workspaces.
+          const ecHeaders = {
+            Authorization: `Bearer ${apiKey}`,
+            Origin: "https://enter.converge.ai",
+            Referer: "https://enter.converge.ai/",
+            Accept: "application/json",
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          };
+          const ecRes = await fetch("https://api.enter.pro/code/api/v1/workspaces", {
+            headers: ecHeaders,
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!ecRes.ok) {
+            isValid = false;
+            return NextResponse.json({
+              valid: false,
+              error: ecRes.status === 401 || ecRes.status === 403
+                ? "Invalid Enter Converge API key"
+                : `Enter Converge API error (${ecRes.status})`,
+            });
+          }
+          const ecJson = await ecRes.json().catch(() => null);
+          const workspaces = ecJson?.data?.workspaces;
+          const workspaceId =
+            workspaces?.[0]?.id != null ? String(workspaces[0].id) : null;
+          isValid = true;
+          return NextResponse.json({
+            valid: true,
+            error: null,
+            // UI / bulk save can persist this automatically
+            providerSpecificData: workspaceId ? { workspaceId } : undefined,
+          });
+        }
+
         case "openai":
           const openaiRes = await fetch("https://api.openai.com/v1/models", {
             headers: { "Authorization": `Bearer ${apiKey}` },

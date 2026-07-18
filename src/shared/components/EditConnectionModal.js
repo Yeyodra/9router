@@ -22,6 +22,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [ecData, setEcData] = useState({ workspaceId: "" });
   const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -48,6 +49,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (connection.provider === "cloudflare-ai" && connection.providerSpecificData) {
         setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
       }
+      if (connection.provider === "enter-converge" && connection.providerSpecificData) {
+        setEcData({ workspaceId: connection.providerSpecificData.workspaceId || "" });
+      }
       // Load region for providers that support it (e.g. xiaomi-tokenplan)
       const providerCfg = AI_PROVIDERS?.[connection.provider];
       if (providerCfg?.regions) {
@@ -62,6 +66,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const isOAuth = connection?.authType === "oauth";
   const isAzure = connection?.provider === "azure";
   const isCloudflareAi = connection?.provider === "cloudflare-ai";
+  const isEnterConverge = connection?.provider === "enter-converge";
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
@@ -101,6 +106,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           apiKey: formData.apiKey,
           ...(isAzure ? { providerSpecificData: azureData } : {}),
           ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+          ...(isEnterConverge ? { providerSpecificData: ecData } : {}),
           ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
         }),
       });
@@ -134,10 +140,11 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
               body: JSON.stringify({
                 provider: connection.provider,
                 apiKey: formData.apiKey,
-                ...(isAzure ? { providerSpecificData: azureData } : {}),
-                ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
-                ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
-              }),
+          ...(isAzure ? { providerSpecificData: azureData } : {}),
+          ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+          ...(isEnterConverge ? { providerSpecificData: ecData } : {}),
+          ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
+        }),
             });
             const data = await res.json();
             isValid = !!data.valid;
@@ -166,6 +173,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       }
       if (isCloudflareAi) {
         updates.providerSpecificData = { accountId: cloudflareData.accountId };
+      }
+      if (isEnterConverge) {
+        updates.providerSpecificData = { workspaceId: ecData.workspaceId };
       }
       // Persist updated region for region-aware providers
       if (providerRegions && region) {
@@ -273,7 +283,20 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           />
         )}
 
-        {!isCompatible && !isAzure && !isCloudflareAi && (
+        {isEnterConverge && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">Enter Converge</h3>
+            <Input
+              label="Workspace ID (optional)"
+              value={ecData.workspaceId}
+              onChange={(e) => setEcData({ ...ecData, workspaceId: e.target.value })}
+              placeholder="auto from API key"
+              hint="Optional — leave blank; resolved automatically from ek_ key on chat/usage."
+            />
+          </div>
+        )}
+
+        {!isCompatible && !isAzure && !isCloudflareAi && !isEnterConverge && (
           <div className="flex items-center gap-3">
             <Button onClick={handleTest} variant="secondary" disabled={testing}>
               {testing ? "Testing..." : "Test Connection"}

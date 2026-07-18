@@ -24,7 +24,7 @@
  * @returns {{baseName: string, apiKey: string, providerSpecificData?: object}|null}
  */
 function parseLine(line, opts = {}) {
-  const { isCloudflareAi = false } = opts;
+  const { isCloudflareAi = false, isEnterConverge = false } = opts;
   const parts = line.split("|");
 
   if (isCloudflareAi && parts.length >= 3) {
@@ -36,6 +36,25 @@ function parseLine(line, opts = {}) {
       baseName: baseName || "Key",
       apiKey,
       providerSpecificData: { accountId },
+    };
+  }
+
+  if (isEnterConverge && parts.length >= 3) {
+    // name|apiKey|workspaceId  OR  apiKey|workspaceId (auto-named)
+    const baseName = parts[0].trim();
+    // Detect apiKey-only (no name): ek_ prefix signals the first part is the key itself
+    if (baseName.startsWith("ek_")) {
+      // apiKey|workspaceId format (no name supplied)
+      const apiKey = parts[0].trim();
+      const workspaceId = parts[parts.length - 1].trim();
+      return { baseName: "Key", apiKey, providerSpecificData: { workspaceId } };
+    }
+    const apiKey = parts.slice(1, -1).join("|").trim();
+    const workspaceId = parts[parts.length - 1].trim();
+    return {
+      baseName: baseName || "Key",
+      apiKey,
+      providerSpecificData: { workspaceId },
     };
   }
 
@@ -60,7 +79,7 @@ function parseLine(line, opts = {}) {
  * @returns {{name: string, apiKey: string, skipped: boolean, providerSpecificData?: object}[]}
  */
 export function planBulkAdd(lines, existingNames, opts = {}) {
-  const { isCloudflareAi = false } = opts;
+  const { isCloudflareAi = false, isEnterConverge = false } = opts;
 
   const safeExisting = Array.isArray(existingNames) ? existingNames : [];
   const used = new Set(safeExisting.map((n) => (typeof n === "string" ? n.toLowerCase() : "")));

@@ -20,6 +20,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const isAzure = provider === "azure";
   const isCloudflareAi = provider === "cloudflare-ai";
+  const isEnterConverge = provider === "enter-converge";
   const providerRegions = AI_PROVIDERS?.[provider]?.regions || null;
   const defaultRegion = AI_PROVIDERS?.[provider]?.defaultRegion || providerRegions?.[0]?.id || "";
 
@@ -38,6 +39,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [ecData, setEcData] = useState({ workspaceId: "" });
   const [region, setRegion] = useState(defaultRegion);
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
@@ -64,6 +66,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     }
     if (isCloudflareAi) {
       return { accountId: cloudflareData.accountId };
+    }
+    if (isEnterConverge) {
+      return { workspaceId: ecData.workspaceId };
     }
     if (providerRegions && region) {
       return { region };
@@ -100,6 +105,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     setSaving(true);
     try {
       let isValid = false;
+      let autoSpecific = null;
       try {
         setValidating(true);
         setValidationResult(null);
@@ -111,10 +117,28 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         const data = await res.json();
         isValid = !!data.valid;
         setValidationResult(isValid ? "success" : "failed");
+        autoSpecific = data?.providerSpecificData || null;
+        // Enter Converge: auto-fill workspaceId from validate (farm keys only need ek_)
+        if (isEnterConverge && autoSpecific?.workspaceId) {
+          setEcData((prev) => ({
+            ...prev,
+            workspaceId: prev.workspaceId || autoSpecific.workspaceId,
+          }));
+        }
       } catch {
         setValidationResult("failed");
+        autoSpecific = null;
       } finally {
         setValidating(false);
+      }
+
+      const specific = { ...(buildProviderSpecificData() || {}) };
+      if (autoSpecific && typeof autoSpecific === "object") {
+        Object.assign(specific, autoSpecific);
+      }
+      // prefer user-typed workspace if present
+      if (isEnterConverge && ecData.workspaceId) {
+        specific.workspaceId = ecData.workspaceId;
       }
 
       await onSave({
@@ -124,7 +148,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         priority: formData.priority,
         proxyPoolId: formData.proxyPoolId === NONE_PROXY_POOL_VALUE ? null : formData.proxyPoolId,
         testStatus: isValid ? "active" : "unknown",
-        providerSpecificData: buildProviderSpecificData()
+        providerSpecificData: Object.keys(specific).length ? specific : undefined,
       });
     } finally {
       setSaving(false);
@@ -137,7 +161,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     // Plan collision-free names against existing connections so a generated
     // "Key N" never matches a saved name (which the backend would upsert /
     // overwrite instead of inserting). See bulkAdd.js for the full rationale.
-    const plan = planBulkAdd(lines, existingNames, { isCloudflareAi });
+    const plan = planBulkAdd(lines, existingNames, { isCloudflareAi, isEnterConverge });
     if (!plan.length) return;
     setSaving(true);
     setBulkResult(null);
@@ -145,6 +169,26 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     let failed = 0;
     for (const entry of plan) {
       try {
+        let specific = entry.providerSpecificData || null;
+        // Enter Converge farm paste: ek_ only → auto-resolve workspace on validate
+        if (isEnterConverge && !specific?.workspaceId && entry.apiKey) {
+          try {
+            const vRes = await fetch("/api/providers/validate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ provider, apiKey: entry.apiKey }),
+            });
+            const vData = await vRes.json();
+            if (vData?.providerSpecificData?.workspaceId) {
+              specific = {
+                ...(specific || {}),
+                workspaceId: vData.providerSpecificData.workspaceId,
+              };
+            }
+          } catch {
+            // chat/usage can still resolve at runtime
+          }
+        }
         const res = await fetch("/api/providers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -154,7 +198,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             name: entry.name,
             priority: 1,
             testStatus: "unknown",
-            ...(entry.providerSpecificData ? { providerSpecificData: entry.providerSpecificData } : {}),
+            ...(specific ? { providerSpecificData: specific } : {}),
           }),
         });
         if (res.ok) success++;
@@ -310,6 +354,21 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             />
             <p className="text-xs text-text-muted mt-2">
               Find your Account ID in the right sidebar of <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" className="text-primary underline">dash.cloudflare.com</a>
+            </p>
+          </div>
+        )}
+        {isEnterConverge && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">Enter Converge</h3>
+            <Input
+              label="Workspace ID (optional)"
+              value={ecData.workspaceId}
+              onChange={(e) => setEcData({ ...ecData, workspaceId: e.target.value })}
+              placeholder="auto from API key"
+              hint="Optional — auto-resolved from ek_ via GET /workspaces. Farm keys only need API key."
+            />
+            <p className="text-xs text-text-muted mt-2">
+              Leave blank for farm keys. Workspace is auto-detected on save/validate.
             </p>
           </div>
         )}

@@ -563,6 +563,71 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         const res = await fetchWithConnectionProxy("https://ai-gateway.vercel.sh/v1/models", { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
       }
+      case "enter-converge": {
+        // Farm keys only store ek_ — resolve workspace then ping models list.
+        const ecHeaders = {
+          Authorization: `Bearer ${connection.apiKey}`,
+          Origin: "https://enter.converge.ai",
+          Referer: "https://enter.converge.ai/",
+          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        };
+        const wsRes = await fetchWithConnectionProxy(
+          "https://api.enter.pro/code/api/v1/workspaces",
+          { headers: ecHeaders },
+          effectiveProxy,
+        );
+        if (wsRes.status === 401 || wsRes.status === 403) {
+          return { valid: false, error: "Invalid Enter Converge API key" };
+        }
+        if (!wsRes.ok) {
+          return { valid: false, error: `Enter Converge API error (${wsRes.status})` };
+        }
+        let workspaceId =
+          connection.providerSpecificData?.workspaceId ||
+          connection.providerSpecificData?.workspace_id ||
+          null;
+        try {
+          const wsJson = await wsRes.json();
+          const list = wsJson?.data?.workspaces;
+          if (!workspaceId && Array.isArray(list) && list[0]?.id != null) {
+            workspaceId = String(list[0].id);
+          }
+        } catch {
+          // ignore parse errors; models probe below may still work
+        }
+        // Optional: confirm models endpoint (same auth fingerprint as chat)
+        const modelsRes = await fetchWithConnectionProxy(
+          "https://api.enter.pro/code/api/v1/ai-capability/models",
+          { headers: ecHeaders },
+          effectiveProxy,
+        );
+        const valid = modelsRes.ok || modelsRes.status === 200;
+        if (!valid) {
+          return {
+            valid: false,
+            error:
+              modelsRes.status === 401 || modelsRes.status === 403
+                ? "Invalid Enter Converge API key"
+                : `Enter Converge models probe failed (${modelsRes.status})`,
+          };
+        }
+        // Persist auto-resolved workspace so chat/usage don't re-resolve every time
+        if (workspaceId && !connection.providerSpecificData?.workspaceId) {
+          try {
+            await updateProviderConnection(connection.id, {
+              providerSpecificData: {
+                ...(connection.providerSpecificData || {}),
+                workspaceId: String(workspaceId),
+              },
+            });
+          } catch {
+            // non-fatal
+          }
+        }
+        return { valid: true, error: null };
+      }
       case "anthropic": {
         const res = await fetchWithConnectionProxy("https://api.anthropic.com/v1/messages", {
           method: "POST",
