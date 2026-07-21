@@ -42,6 +42,8 @@ export default {
     },
   },
   models: [
+    // Auto-router (upstream picks model; vision-capable)
+    { id: "auto", name: "Auto" },
     // Opus (added per kiro.dev/changelog/models and kiro.dev/docs/models)
     { id: "claude-opus-4.8", name: "Claude Opus 4.8" },
     { id: "claude-opus-4.8-thinking", name: "Claude Opus 4.8 (Thinking)" },
