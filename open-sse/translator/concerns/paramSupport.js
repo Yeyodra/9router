@@ -24,6 +24,16 @@ const STRIP_RULES = [
   // Enter Pro: OpenAI models reject max_tokens — must use max_completion_tokens instead.
   // Model ids arrive as "openai/gpt-5.x-*" or bare "gpt-5.x-*".
   { provider: "enter-converge", match: /(^|\/)gpt-/i, renameMaxTokens: true },
+  // Enter Pro chat/completions rejects tools + reasoning_effort together for GPT
+  // ("Please use /v1/responses instead"). Drop reasoning flags so agent tools work.
+  {
+    provider: "enter-converge",
+    match: /(^|\/)gpt-/i,
+    dropReasoningWithTools: true,
+    // Also drop reasoning when no tools — THINK:medium still 400s some GPT variants
+    // on chat/completions; keep path simple.
+    drop: ["reasoning_effort", "thinking", "reasoning"],
+  },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.
@@ -51,6 +61,17 @@ export function stripUnsupportedParams(provider, model, body) {
     if (rule.renameMaxTokens && body.max_tokens !== undefined && body.max_completion_tokens === undefined) {
       body.max_completion_tokens = body.max_tokens;
       delete body.max_tokens;
+    }
+    // Enter Pro: tools + reasoning_effort invalid on /chat/completions for GPT
+    if (rule.dropReasoningWithTools) {
+      const hasTools =
+        (Array.isArray(body.tools) && body.tools.length > 0) ||
+        (Array.isArray(body.functions) && body.functions.length > 0);
+      if (hasTools || body.reasoning_effort !== undefined || body.thinking !== undefined || body.reasoning !== undefined) {
+        delete body.reasoning_effort;
+        delete body.thinking;
+        delete body.reasoning;
+      }
     }
     // CF Workers AI oneOf root schema only accepts content as plain string (#1926)
     if (rule.flattenContent && Array.isArray(body.messages)) {
