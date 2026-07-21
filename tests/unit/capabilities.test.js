@@ -43,4 +43,9 @@ describe("getCapabilitiesForModel", () => {
     expect(getCapabilitiesForModel("kiro", "gpt-5.6-luna-agentic")).toMatchObject(kiroGpt56Expected);
     expect(getCapabilitiesForModel("kiro", "gpt-5.6-sol-thinking-agentic")).toMatchObject(kiroGpt56Expected);
   });
+
+  it("reports Kiro auto-router as vision-capable", () => {
+    expect(getCapabilitiesForModel("kiro", "auto").vision).toBe(true);
+    expect(getCapabilitiesForModel("kiro", "kr/auto").vision).toBe(true);
+  });
 });
