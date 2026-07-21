@@ -293,7 +293,7 @@ export default function ProviderLimits() {
   }, []);
 
 
-  // Enter Converge pool: ALL keys (not just current page) — separate from card pagination
+  // Enter Converge pool: ONE server call (aggregates all keys + 45s cache)
   const [enterConvergePool, setEnterConvergePool] = useState(null);
   const enterConvergePoolBusyRef = useRef(false);
 
@@ -301,84 +301,29 @@ export default function ProviderLimits() {
     if (enterConvergePoolBusyRef.current) return;
     enterConvergePoolBusyRef.current = true;
     setEnterConvergePool((prev) =>
-      prev ? { ...prev, loading: true } : { accounts: 0, withData: 0, loading: true, remaining: 0, total: 0, pct: 0 },
+      prev
+        ? { ...prev, loading: true }
+        : { accounts: 0, withData: 0, loading: true, remaining: 0, total: 0, pct: 0 },
     );
     try {
-      // page through all enter-converge connections (API max pageSize 500)
-      const allEc = [];
-      let pageNum = 1;
-      let totalPages = 1;
-      do {
-        const params = new URLSearchParams({
-          page: String(pageNum),
-          pageSize: "500",
-          accountStatus: "all",
-          provider: "enter-converge",
-          sort: "priority",
-        });
-        const res = await fetch(`/api/providers/client?${params}`);
-        if (!res.ok) break;
-        const data = await res.json();
-        const list = data.connections || [];
-        allEc.push(...list);
-        totalPages = Math.max(1, Number(data.pagination?.totalPages) || 1);
-        pageNum += 1;
-      } while (pageNum <= totalPages && pageNum <= 20); // hard cap 10k keys
-
-      if (allEc.length === 0) {
+      const res = await fetch("/api/usage/enter-converge/pool", { cache: "no-store" });
+      if (!res.ok) {
+        setEnterConvergePool((prev) => (prev ? { ...prev, loading: false } : null));
+        return;
+      }
+      const data = await res.json();
+      if (!data || (data.accounts === 0 && !data.withData)) {
         setEnterConvergePool(null);
         return;
       }
-
-      // Fetch usage with limited concurrency (avoid hammering Enter API)
-      const CONCURRENCY = 8;
-      let remaining = 0;
-      let total = 0;
-      let withData = 0;
-      let idx = 0;
-
-      async function worker() {
-        while (idx < allEc.length) {
-          const i = idx++;
-          const conn = allEc[i];
-          try {
-            const r = await fetch(`/api/usage/${conn.id}`);
-            if (!r.ok) continue;
-            const data = await r.json();
-            const parsed = parseQuotaData(conn.provider, data);
-            if (!Array.isArray(parsed) || parsed.length === 0) continue;
-            const row =
-              parsed.find((q) => String(q.name || "").toLowerCase() === "credits") ||
-              parsed[0];
-            if (!row) continue;
-            const rem =
-              row.remaining != null
-                ? Number(row.remaining)
-                : Math.max(0, Number(row.total || 0) - Number(row.used || 0));
-            const tot = Number(row.total || 0);
-            if (!Number.isFinite(rem)) continue;
-            remaining += rem;
-            if (Number.isFinite(tot) && tot > 0) total += tot;
-            withData += 1;
-          } catch {
-            // skip failed key
-          }
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, allEc.length) }, () => worker()),
-      );
-
-      const tot = total > 0 ? total : remaining;
-      const pct = tot > 0 ? Math.round((remaining / tot) * 100) : remaining > 0 ? 100 : 0;
       setEnterConvergePool({
-        accounts: allEc.length,
-        withData,
+        accounts: Number(data.accounts) || 0,
+        withData: Number(data.withData) || 0,
         loading: false,
-        remaining,
-        total: tot,
-        pct,
+        remaining: Number(data.remaining) || 0,
+        total: Number(data.total) || 0,
+        pct: Number(data.pct) || 0,
+        cached: !!data.cached,
       });
     } catch (e) {
       console.error("[ProviderLimits] Enter Converge pool refresh failed:", e);
@@ -1135,6 +1080,7 @@ export default function ProviderLimits() {
                   {enterConvergePool.withData}/{enterConvergePool.accounts} keys
                   {" (all accounts)"}
                   {enterConvergePool.loading ? " loading..." : ""}
+                  {enterConvergePool.cached && !enterConvergePool.loading ? " · cached" : ""}
                 </div>
               </div>
             </div>

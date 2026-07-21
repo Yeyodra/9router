@@ -86,6 +86,40 @@ function quotaRow(remaining, total) {
 }
 
 /**
+ * Fast path for pool aggregation: 1 request per key (simple credits).
+ * Prefer stored workspaceId to skip GET /workspaces.
+ * @returns {Promise<{ remaining: number, total: number }|null>}
+ */
+export async function getEnterConvergeCreditsQuick(apiKey, providerSpecificData = null, proxyOptions = null) {
+  if (!apiKey) return null;
+  const workspaceId = await resolveEnterConvergeWorkspaceId(
+    apiKey,
+    providerSpecificData,
+    proxyOptions,
+  );
+  if (!workspaceId) return null;
+  cacheEnterConvergeWorkspaceId(apiKey, workspaceId);
+
+  try {
+    const simpleUrl = `${BASE}/workspaces/${workspaceId}/credits`;
+    const { res, json } = await getJson(simpleUrl, apiKey, proxyOptions);
+    if (!res.ok || json?.code !== 0) return null;
+    const remaining = num(json?.data?.credits, null);
+    if (remaining === null) return null;
+
+    // Soft ceiling for free farm packs (same heuristic as full usage)
+    let mainTotal = remaining;
+    if (remaining <= 100) mainTotal = 100;
+    else if (remaining <= 200) mainTotal = 200;
+    else mainTotal = remaining;
+
+    return { remaining, total: mainTotal };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * @param {string} apiKey
  * @param {object|null} providerSpecificData  must include workspaceId
  * @param {object|null} proxyOptions
