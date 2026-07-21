@@ -10,6 +10,12 @@ const TARGETS_NEED_BASE64 = new Set([
   FORMATS.ANTIGRAVITY, FORMATS.OLLAMA, FORMATS.KIRO,
 ]);
 
+// Providers that speak OpenAI-compat but still reject remote image URLs
+// (e.g. Enter Converge Claude path: "URL sources are not supported").
+const PROVIDERS_NEED_BASE64 = new Set([
+  "enter-converge",
+]);
+
 function isRemoteUrl(url) {
   return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
 }
@@ -74,10 +80,14 @@ function collectImageRefs(body, sourceFormat) {
 /**
  * Replace remote image URLs with base64 data when the target needs inline data.
  * No-op when target accepts remote URLs (e.g. openai, claude) or body has none.
+ * Pass options.provider for OpenAI-compat gateways that still reject URL images.
  * @returns {Promise<number>} count of images converted
  */
 export async function prefetchRemoteImages(body, sourceFormat, targetFormat, options = {}) {
-  if (!body || !TARGETS_NEED_BASE64.has(targetFormat)) return 0;
+  const needBase64 =
+    TARGETS_NEED_BASE64.has(targetFormat) ||
+    (options.provider && PROVIDERS_NEED_BASE64.has(options.provider));
+  if (!body || !needBase64) return 0;
   const refs = collectImageRefs(body, sourceFormat);
   if (!refs.length) return 0;
 

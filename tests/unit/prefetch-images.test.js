@@ -55,4 +55,27 @@ describe("prefetchRemoteImages", () => {
     expect(n).toBe(1);
     expect(body.messages[0].content[0].source.type).toBe("base64");
   });
+
+  it("openai target stays no-op without provider override", async () => {
+    const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://x/a.png" } }] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI, FORMATS.OPENAI, { provider: "openrouter" });
+    expect(n).toBe(0);
+    expect(body.messages[0].content[0].image_url.url).toBe("https://x/a.png");
+  });
+
+  it("enter-converge forces base64 even when target is openai", async () => {
+    const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://x/a.png" } }] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.OPENAI, FORMATS.OPENAI, { provider: "enter-converge" });
+    expect(n).toBe(1);
+    expect(body.messages[0].content[0].image_url.url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("enter-converge: claude source.url -> base64 before openai hop", async () => {
+    const body = { messages: [{ role: "user", content: [
+      { type: "image", source: { type: "url", url: "https://x/a.png" } },
+    ] }] };
+    const n = await prefetchRemoteImages(body, FORMATS.CLAUDE, FORMATS.OPENAI, { provider: "enter-converge" });
+    expect(n).toBe(1);
+    expect(body.messages[0].content[0].source.type).toBe("base64");
+  });
 });
