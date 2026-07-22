@@ -52,4 +52,32 @@ describe("stripUnsupportedParams", () => {
 
     expect(body.max_tokens).toBe(64000);
   });
+
+  it("drops Jan/OpenWebUI sampling params for all Enter Converge models", () => {
+    const gpt = {
+      top_k: 40,
+      temperature: 0.7,
+      top_p: 0.9,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+      max_tokens: 128,
+      reasoning_effort: "medium",
+    };
+    stripUnsupportedParams("enter-converge", "openai/gpt-5.6-sol", gpt);
+    expect(gpt.top_k).toBeUndefined();
+    expect(gpt.temperature).toBeUndefined();
+    expect(gpt.top_p).toBeUndefined();
+    expect(gpt.frequency_penalty).toBeUndefined();
+    expect(gpt.presence_penalty).toBeUndefined();
+    expect(gpt.reasoning_effort).toBeUndefined();
+    expect(gpt.max_completion_tokens).toBe(128);
+    expect(gpt.max_tokens).toBeUndefined();
+
+    const claude = { top_k: 40, temperature: 0.7, top_p: 0.9, max_tokens: 64 };
+    stripUnsupportedParams("enter-converge", "anthropic/claude-opus-4.6", claude);
+    expect(claude.top_k).toBeUndefined();
+    expect(claude.temperature).toBeUndefined();
+    expect(claude.top_p).toBeUndefined();
+    expect(claude.max_tokens).toBe(64);
+  });
 });

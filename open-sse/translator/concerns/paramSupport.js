@@ -34,6 +34,20 @@ const STRIP_RULES = [
     // on chat/completions; keep path simple.
     drop: ["reasoning_effort", "thinking", "reasoning"],
   },
+  // OpenWebUI/Jan sampling knobs — EC (esp. GPT-5.x) rejects unknown/non-default values.
+  {
+    provider: "enter-converge",
+    drop: [
+      "top_k",
+      "temperature",
+      "top_p",
+      "min_p",
+      "typical_p",
+      "repetition_penalty",
+      "frequency_penalty",
+      "presence_penalty",
+    ],
+  },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.
