@@ -22,6 +22,23 @@ import { MimoFreeExecutor } from "./mimo-free.js";
 import { CodeBuddyExecutor } from "./codebuddy-cn.js";
 import { DefaultExecutor } from "./default.js";
 
+// DashScope-intl (Qwen Cloud) caps max_tokens at 16384.
+// Cap it here to avoid 400 errors from clients sending large context windows.
+class QwenCloudExecutor extends DefaultExecutor {
+  constructor() { super("qwen-cloud"); }
+  transformRequest(model, body, stream, credentials) {
+    const next = super.transformRequest(model, body, stream, credentials);
+    if (next && typeof next === "object") {
+      const mt = next.max_tokens ?? next.max_completion_tokens;
+      if (typeof mt === "number" && mt > 16384) {
+        next.max_tokens = 16384;
+        delete next.max_completion_tokens;
+      }
+    }
+    return next;
+  }
+}
+
 const executors = {
   antigravity: new AntigravityExecutor(),
   azure: new AzureExecutor(),
@@ -37,6 +54,7 @@ const executors = {
   vertex: new VertexExecutor("vertex"),
   "vertex-partner": new VertexExecutor("vertex-partner"),
   qwen: new QwenExecutor(),
+  "qwen-cloud": new QwenCloudExecutor(),
   opencode: new OpenCodeExecutor(),
   "opencode-go": new OpenCodeGoExecutor(),
   "grok-web": new GrokWebExecutor(),
