@@ -93,6 +93,41 @@ function isVideoFailed(status) {
   return /^(failed|failure|error|cancelled|canceled)$/i.test(String(status || ""));
 }
 
+function videoUrlNeedsAuthProxy(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return false;
+  if (rawUrl.startsWith("/") || rawUrl.startsWith("blob:") || rawUrl.startsWith("data:")) return false;
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    return (
+      host === "openrouter.ai"
+      || host.endsWith(".openrouter.ai")
+      || host.includes("getunikey")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch auth-gated video via 9router proxy → blob URL for <video src>. */
+async function fetchVideoAsBlobUrl(rawUrl, jobId, connHeader, dashboardApiKey) {
+  if (!rawUrl) return null;
+  if (!videoUrlNeedsAuthProxy(rawUrl)) return rawUrl;
+  const q = new URLSearchParams({ url: rawUrl });
+  const headers = { Accept: "*/*" };
+  if (dashboardApiKey) headers.Authorization = `Bearer ${dashboardApiKey}`;
+  if (connHeader) headers["x-connection-id"] = connHeader;
+  const res = await fetch(
+    `/api/v1/videos/${encodeURIComponent(jobId || "file")}/content?${q}`,
+    { headers },
+  );
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(t.slice(0, 200) || `Video proxy HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 const VIDEO_POLL_INTERVAL_MS = 4000;
 const VIDEO_POLL_MAX_MS = 10 * 60 * 1000; // 10 min
 
@@ -319,6 +354,7 @@ export function GenericExampleCard({ providerId, kind }) {
                 status: norm.status,
                 progress: norm.progress,
                 video_url: norm.videoUrl,
+                source_url: norm.videoUrl,
                 fail_reason: norm.failReason,
                 create: data,
                 poll: pollJson,
@@ -329,6 +365,47 @@ export function GenericExampleCard({ providerId, kind }) {
             if (isVideoTerminal(norm.status)) {
               if (isVideoFailed(norm.status) || norm.failReason) {
                 setError(norm.failReason || `Video job ${norm.status}`);
+                return;
+              }
+              // SUCCESS: resolve playable blob (OpenRouter content URL needs Bearer)
+              if (norm.videoUrl) {
+                try {
+                  const playable = await fetchVideoAsBlobUrl(
+                    norm.videoUrl,
+                    jobId,
+                    connHeader,
+                    apiKey,
+                  );
+                  if (playable && playable !== norm.videoUrl) {
+                    if (binaryImageUrl) { try { URL.revokeObjectURL(binaryImageUrl); } catch {} }
+                    // reuse binaryImageUrl slot for video blob lifecycle
+                    setBinaryImageUrl(playable.startsWith("blob:") ? playable : "");
+                  }
+                  setResult({
+                    data: {
+                      job_id: jobId,
+                      status: norm.status,
+                      progress: norm.progress,
+                      video_url: playable || norm.videoUrl,
+                      source_url: norm.videoUrl,
+                      fail_reason: null,
+                      create: data,
+                      poll: pollJson,
+                    },
+                    latencyMs: Date.now() - start,
+                  });
+                  setProgress({
+                    stage: norm.status,
+                    jobId,
+                    progress: 100,
+                    videoUrl: playable || norm.videoUrl,
+                  });
+                } catch (proxyErr) {
+                  setError(
+                    `Video ready but playback proxy failed: ${proxyErr.message}. `
+                    + "Copy source_url and open via authenticated client.",
+                  );
+                }
               }
               return;
             }

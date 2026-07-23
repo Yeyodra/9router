@@ -232,3 +232,101 @@ export async function handleVideoGet(request, requestId) {
   );
   return result.response;
 }
+
+/**
+ * GET /v1/videos/{id}/content?url=... — proxy binary video for providers that return
+ * auth-gated result URLs (UniKey → OpenRouter content URL needs Bearer, not cookies).
+ * Browser <video src> cannot send Authorization; we fetch server-side with connection key.
+ */
+export async function handleVideoContentProxy(request) {
+  const authError = await requireValidApiKey(request);
+  if (authError) return authError;
+
+  const url = new URL(request.url);
+  const target = url.searchParams.get("url");
+  if (!target) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing url query param");
+
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid url");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, "url must be http(s)");
+  }
+  // Only allow known video-host patterns (avoid open proxy)
+  const host = parsed.hostname.toLowerCase();
+  const allowed =
+    host === "openrouter.ai"
+    || host.endsWith(".openrouter.ai")
+    || host.includes("getunikey")
+    || host.includes("oss-")
+    || host.includes("aliyuncs.com")
+    || host.includes("cloudflare")
+    || host.includes("r2.dev");
+  if (!allowed) {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, `Host not allowed for video proxy: ${host}`);
+  }
+
+  const preferredConnectionId = request.headers.get("x-connection-id") || null;
+  let provider = DEFAULT_VIDEO_PROVIDER;
+  if (preferredConnectionId) {
+    try {
+      const conn = await getProviderConnectionById(preferredConnectionId);
+      if (conn?.provider && getVideoConfig(conn.provider)) provider = conn.provider;
+    } catch { /* default */ }
+  }
+
+  const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
+  if (!credentials || credentials.allRateLimited) {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+  }
+
+  const token = credentials.apiKey || credentials.accessToken;
+  try {
+    // Try UniKey/provider Bearer first; some CDNs are public after redirect.
+    const attempts = [
+      token ? { Authorization: `Bearer ${token}`, Accept: "*/*" } : null,
+      { Accept: "*/*" },
+    ].filter(Boolean);
+
+    let upstream = null;
+    let lastStatus = 0;
+    let lastBody = "";
+    for (const headers of attempts) {
+      upstream = await fetch(target, {
+        method: "GET",
+        headers,
+        redirect: "follow",
+        signal: request.signal,
+      });
+      lastStatus = upstream.status;
+      if (upstream.ok) break;
+      lastBody = await upstream.text().catch(() => "");
+      // drain non-ok body already consumed — next attempt needs new fetch
+      upstream = null;
+    }
+    if (!upstream?.ok) {
+      return errorResponse(
+        lastStatus || HTTP_STATUS.BAD_GATEWAY,
+        sanitizeSecrets(
+          lastBody.slice(0, 500)
+            || `Upstream ${lastStatus} (auth-gated URL — open via UniKey web or use OSS public link)`,
+          credentials,
+        ),
+      );
+    }
+    const ctype = upstream.headers.get("content-type") || "video/mp4";
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        "Content-Type": ctype,
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "private, max-age=3600",
+      },
+    });
+  } catch (err) {
+    return errorResponse(HTTP_STATUS.BAD_GATEWAY, `Video content proxy failed: ${err.message}`);
+  }
+}
