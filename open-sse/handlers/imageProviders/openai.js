@@ -15,9 +15,14 @@ export default function createOpenAIAdapter(providerId) {
       return headers;
     },
     buildBody: (model, body) => {
-      const { prompt, n = 1, size = "1024x1024", quality, style, response_format } = body;
-      const full = { model, prompt, n, size };
-      if (quality) full.quality = quality;
+      const { prompt, n = 1, size, quality, style, response_format } = body;
+      const full = { model, prompt, n };
+      // UI default "auto" is not a real size. UniKey/Gemini maps it to aspect_ratio "auto" → 400.
+      // Empty/auto → omit size (upstream picks default) unless bodyFields requires it.
+      if (size && size !== "auto") full.size = size;
+      else if (!size) full.size = "1024x1024"; // classic OpenAI callers that omit size
+      // "auto" quality/background are placeholders — only forward concrete values
+      if (quality && quality !== "auto") full.quality = quality;
       if (style) full.style = style;
       if (response_format) full.response_format = response_format;
       // bodyFields whitelist (e.g. xAI accepts only model/prompt/n/response_format)
