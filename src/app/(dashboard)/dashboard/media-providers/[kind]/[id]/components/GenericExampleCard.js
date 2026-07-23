@@ -61,15 +61,25 @@ function normalizeVideoPoll(data) {
     progress = m ? Number(m[1]) : 0;
   }
   const nested = inner.data && typeof inner.data === "object" ? inner.data : null;
+  // UniKey/New-API: result_url + data.unsigned_urls[]; xAI: video.url
   const videoUrl =
     inner.video?.url
     || inner.url
     || inner.video_url
+    || inner.result_url
     || nested?.url
     || nested?.video_url
     || nested?.video?.url
+    || nested?.result_url
+    || (Array.isArray(nested?.unsigned_urls) && nested.unsigned_urls[0])
+    || (Array.isArray(nested?.urls) && nested.urls[0])
+    || (Array.isArray(inner.unsigned_urls) && inner.unsigned_urls[0])
     || null;
-  const failReason = inner.fail_reason || inner.error || data.error?.message || null;
+  const failReason =
+    (inner.fail_reason && String(inner.fail_reason).trim())
+    || inner.error
+    || data.error?.message
+    || null;
   return { status, progress: Number(progress) || 0, videoUrl, failReason, raw: data };
 }
 
