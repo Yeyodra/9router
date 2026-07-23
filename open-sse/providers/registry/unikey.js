@@ -60,8 +60,17 @@ export default {
     { id: "qwen/qwen3.7-plus", name: "Qwen3.7 Plus" },
     { id: "qwen/qwen3.6-plus", name: "Qwen3.6 Plus" },
     { id: "qwen/qwen3.6-flash", name: "Qwen3.6 Flash" },
+    // Image gen via POST /v1/images/generations (Bearer). Live probe 2026-07-23.
+    { id: "openai/gpt-5.4-image-2", name: "GPT 5.4 Image 2", kind: "image", params: ["n", "size"] },
+    { id: "google/gemini-3.1-flash-image", name: "Gemini 3.1 Flash Image", kind: "image", params: ["n", "size"] },
+    { id: "google/gemini-3-pro-image", name: "Gemini 3 Pro Image", kind: "image", params: ["n", "size"] },
+    // Catalog alias; may 403 when account gift quota is exhausted (pre-deduct).
+    { id: "gpt-image-2", name: "GPT Image 2", kind: "image", params: ["n", "size"] },
   ],
-  serviceKinds: ["llm", "imageToText"],
+  serviceKinds: ["llm", "imageToText", "image"],
+  imageConfig: {
+    baseUrl: "https://www.getunikey.ai/v1/images/generations",
+  },
   modelsFetcher: { url: "https://www.getunikey.ai/v1/models", type: "openai" },
   passthroughModels: true,
 };
