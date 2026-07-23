@@ -108,24 +108,45 @@ function videoUrlNeedsAuthProxy(rawUrl) {
   }
 }
 
-/** Fetch auth-gated video via 9router proxy → blob URL for <video src>. */
+/**
+ * Fetch video via 9router proxy → blob URL for <video src>.
+ * Prefer job-native content path (UniKey /v1/videos/{task_id}/content) over OpenRouter result_url.
+ */
 async function fetchVideoAsBlobUrl(rawUrl, jobId, connHeader, dashboardApiKey) {
-  if (!rawUrl) return null;
-  if (!videoUrlNeedsAuthProxy(rawUrl)) return rawUrl;
-  const q = new URLSearchParams({ url: rawUrl });
   const headers = { Accept: "*/*" };
   if (dashboardApiKey) headers.Authorization = `Bearer ${dashboardApiKey}`;
   if (connHeader) headers["x-connection-id"] = connHeader;
-  const res = await fetch(
-    `/api/v1/videos/${encodeURIComponent(jobId || "file")}/content?${q}`,
-    { headers },
-  );
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(t.slice(0, 200) || `Video proxy HTTP ${res.status}`);
+
+  // 1) Always try proxy by job id first when we have one (works for UniKey)
+  if (jobId) {
+    const res = await fetch(`/api/v1/videos/${encodeURIComponent(jobId)}/content`, { headers });
+    if (res.ok) {
+      const ctype = res.headers.get("content-type") || "";
+      if (!ctype.includes("application/json")) {
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      }
+    }
   }
-  const blob = await res.blob();
-  return URL.createObjectURL(blob);
+
+  // 2) Public / non-auth URLs
+  if (rawUrl && !videoUrlNeedsAuthProxy(rawUrl)) return rawUrl;
+
+  // 3) Fallback: proxy with ?url= (may 401 on OpenRouter with UniKey key)
+  if (rawUrl) {
+    const q = new URLSearchParams({ url: rawUrl });
+    const res = await fetch(
+      `/api/v1/videos/${encodeURIComponent(jobId || "file")}/content?${q}`,
+      { headers },
+    );
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(t.slice(0, 200) || `Video proxy HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+  return null;
 }
 
 const VIDEO_POLL_INTERVAL_MS = 4000;

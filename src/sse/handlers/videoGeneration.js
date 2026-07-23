@@ -234,39 +234,58 @@ export async function handleVideoGet(request, requestId) {
 }
 
 /**
- * GET /v1/videos/{id}/content?url=... — proxy binary video for providers that return
- * auth-gated result URLs (UniKey → OpenRouter content URL needs Bearer, not cookies).
- * Browser <video src> cannot send Authorization; we fetch server-side with connection key.
+ * Resolve binary video download URLs for a completed job.
+ * UniKey: GET https://www.getunikey.ai/v1/videos/{task_id}/content + Bearer works.
+ * OpenRouter content URLs in result_url need OpenRouter's own key — UniKey key → 401.
  */
-export async function handleVideoContentProxy(request) {
+function buildVideoContentCandidates(provider, jobId, preferredUrl) {
+  const list = [];
+  if (provider === "unikey" && jobId) {
+    list.push(`https://www.getunikey.ai/v1/videos/${encodeURIComponent(jobId)}/content`);
+  }
+  if (preferredUrl && typeof preferredUrl === "string") list.push(preferredUrl);
+  return [...new Set(list)];
+}
+
+/**
+ * GET /v1/videos/{id}/content[?url=...] — proxy binary video with connection Bearer.
+ * Prefer provider-native content path (UniKey /v1/videos/{task_id}/content) over
+ * upstream OpenRouter result_url which rejects UniKey keys.
+ */
+export async function handleVideoContentProxy(request, jobIdFromPath = null) {
   const authError = await requireValidApiKey(request);
   if (authError) return authError;
 
   const url = new URL(request.url);
-  const target = url.searchParams.get("url");
-  if (!target) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing url query param");
+  const preferredUrl = url.searchParams.get("url");
+  const jobId = jobIdFromPath || url.searchParams.get("job_id") || null;
 
-  let parsed;
-  try {
-    parsed = new URL(target);
-  } catch {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid url");
+  if (preferredUrl) {
+    let parsed;
+    try {
+      parsed = new URL(preferredUrl);
+    } catch {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid url");
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, "url must be http(s)");
+    }
+    const host = parsed.hostname.toLowerCase();
+    const allowed =
+      host === "openrouter.ai"
+      || host.endsWith(".openrouter.ai")
+      || host.includes("getunikey")
+      || host.includes("oss-")
+      || host.includes("aliyuncs.com")
+      || host.includes("cloudflare")
+      || host.includes("r2.dev");
+    if (!allowed) {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, `Host not allowed for video proxy: ${host}`);
+    }
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "url must be http(s)");
-  }
-  // Only allow known video-host patterns (avoid open proxy)
-  const host = parsed.hostname.toLowerCase();
-  const allowed =
-    host === "openrouter.ai"
-    || host.endsWith(".openrouter.ai")
-    || host.includes("getunikey")
-    || host.includes("oss-")
-    || host.includes("aliyuncs.com")
-    || host.includes("cloudflare")
-    || host.includes("r2.dev");
-  if (!allowed) {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, `Host not allowed for video proxy: ${host}`);
+
+  if (!jobId && !preferredUrl) {
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing job id or url");
   }
 
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
@@ -277,6 +296,8 @@ export async function handleVideoContentProxy(request) {
       if (conn?.provider && getVideoConfig(conn.provider)) provider = conn.provider;
     } catch { /* default */ }
   }
+  // UniKey jobs always use unikey content host when job id present
+  if (jobId && String(jobId).startsWith("task_")) provider = "unikey";
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
   if (!credentials || credentials.allRateLimited) {
@@ -284,48 +305,53 @@ export async function handleVideoContentProxy(request) {
   }
 
   const token = credentials.apiKey || credentials.accessToken;
-  try {
-    // Try UniKey/provider Bearer first; some CDNs are public after redirect.
-    const attempts = [
-      token ? { Authorization: `Bearer ${token}`, Accept: "*/*" } : null,
-      { Accept: "*/*" },
-    ].filter(Boolean);
+  const candidates = buildVideoContentCandidates(provider, jobId, preferredUrl);
 
-    let upstream = null;
+  try {
     let lastStatus = 0;
     let lastBody = "";
-    for (const headers of attempts) {
-      upstream = await fetch(target, {
-        method: "GET",
-        headers,
-        redirect: "follow",
-        signal: request.signal,
-      });
-      lastStatus = upstream.status;
-      if (upstream.ok) break;
-      lastBody = await upstream.text().catch(() => "");
-      // drain non-ok body already consumed — next attempt needs new fetch
-      upstream = null;
+    for (const target of candidates) {
+      const attempts = [
+        token ? { Authorization: `Bearer ${token}`, Accept: "*/*" } : null,
+        // public CDN / unsigned may work without auth
+        { Accept: "*/*" },
+      ].filter(Boolean);
+
+      for (const headers of attempts) {
+        const upstream = await fetch(target, {
+          method: "GET",
+          headers,
+          redirect: "follow",
+          signal: request.signal,
+        });
+        lastStatus = upstream.status;
+        if (upstream.ok) {
+          const ctype = upstream.headers.get("content-type") || "video/mp4";
+          // Reject JSON error bodies that still return 200
+          if (ctype.includes("application/json")) {
+            lastBody = await upstream.text().catch(() => "");
+            continue;
+          }
+          return new Response(upstream.body, {
+            status: 200,
+            headers: {
+              "Content-Type": ctype,
+              "Access-Control-Allow-Origin": "*",
+              "Cache-Control": "private, max-age=3600",
+            },
+          });
+        }
+        lastBody = await upstream.text().catch(() => "");
+      }
     }
-    if (!upstream?.ok) {
-      return errorResponse(
-        lastStatus || HTTP_STATUS.BAD_GATEWAY,
-        sanitizeSecrets(
-          lastBody.slice(0, 500)
-            || `Upstream ${lastStatus} (auth-gated URL — open via UniKey web or use OSS public link)`,
-          credentials,
-        ),
-      );
-    }
-    const ctype = upstream.headers.get("content-type") || "video/mp4";
-    return new Response(upstream.body, {
-      status: 200,
-      headers: {
-        "Content-Type": ctype,
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "private, max-age=3600",
-      },
-    });
+    return errorResponse(
+      lastStatus || HTTP_STATUS.BAD_GATEWAY,
+      sanitizeSecrets(
+        lastBody.slice(0, 500)
+          || `Video content unavailable (${lastStatus})`,
+        credentials,
+      ),
+    );
   } catch (err) {
     return errorResponse(HTTP_STATUS.BAD_GATEWAY, `Video content proxy failed: ${err.message}`);
   }

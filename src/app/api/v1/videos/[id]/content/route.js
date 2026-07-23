@@ -11,10 +11,12 @@ export async function OPTIONS() {
 }
 
 /**
- * GET /v1/videos/{id}/content?url=...
- * Proxies auth-gated video binaries (UniKey/OpenRouter result_url) with connection Bearer.
- * Path {id} is the job id (for logging/sticky); actual file URL is the query param.
+ * GET /v1/videos/{id}/content[?url=...]
+ * Proxies video binary with connection Bearer.
+ * UniKey: downloads from getunikey.ai/v1/videos/{task_id}/content (not OpenRouter).
+ * Optional ?url= is fallback only (often 401 with UniKey key).
  */
-export async function GET(request) {
-  return await handleVideoContentProxy(request);
+export async function GET(request, { params }) {
+  const { id } = await params;
+  return await handleVideoContentProxy(request, id);
 }
