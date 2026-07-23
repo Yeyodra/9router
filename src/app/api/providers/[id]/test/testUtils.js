@@ -863,8 +863,30 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         if (invalidCodes.has(code)) return { valid: false, error: "Invalid API key" };
         return { valid: true, error: null };
       }
-      default:
+      case "unikey": {
+        // OpenAI-compat: GET /v1/models with Bearer (registry validateUrl)
+        const validateUrl =
+          PROVIDERS.unikey?.validateUrl || "https://www.getunikey.ai/v1/models";
+        const res = await fetchWithConnectionProxy(validateUrl, {
+          headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json" },
+        }, effectiveProxy);
+        if (res.ok) return { valid: true, error: null };
+        if (res.status === 401 || res.status === 403) return { valid: false, error: "Invalid API key" };
+        return { valid: false, error: `UniKey probe failed (${res.status})` };
+      }
+      default: {
+        // Generic: any registry provider with validateUrl + Bearer api key
+        const validateUrl = PROVIDERS[connection.provider]?.validateUrl;
+        if (validateUrl && connection.apiKey) {
+          const res = await fetchWithConnectionProxy(validateUrl, {
+            headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json" },
+          }, effectiveProxy);
+          if (res.ok) return { valid: true, error: null };
+          if (res.status === 401 || res.status === 403) return { valid: false, error: "Invalid API key" };
+          return { valid: false, error: `Provider probe failed (${res.status})` };
+        }
         return { valid: false, error: "Provider test not supported" };
+      }
     }
   } catch (err) {
     return { valid: false, error: err.message };
