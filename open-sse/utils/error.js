@@ -82,7 +82,12 @@ export async function parseUpstreamError(response, executor = null) {
     message = bodyText;
   }
 
-  const messageStr = typeof message === "string" ? message : JSON.stringify(message);
+  let messageStr = typeof message === "string" ? message : JSON.stringify(message);
+  // CF/nginx/proxy HTML error pages (504/502) — don't dump DOCTYPE into client logs
+  if (messageStr && /^\s*<(!DOCTYPE|html|HTML)\b/i.test(messageStr)) {
+    messageStr = DEFAULT_ERROR_MESSAGES[response.status]
+      || `Upstream gateway error (${response.status})`;
+  }
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
   return { statusCode: response.status, message: finalMessage };

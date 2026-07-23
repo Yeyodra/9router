@@ -1,14 +1,37 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
-import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, DEFAULT_RETRY_CONFIG, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getExecutor } from "../executors/index.js";
 import { getImageAdapter } from "./imageProviders/index.js";
 import { urlToBase64 } from "./imageProviders/_base.js";
+import { PROVIDERS } from "../providers/index.js";
 
 function serializeRequestBody(requestBody) {
   if (typeof FormData !== "undefined" && requestBody instanceof FormData) return requestBody;
   if (typeof requestBody === "string") return requestBody;
   return JSON.stringify(requestBody);
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Same-connection retries for transient gateway errors (CF 502/503/504 HTML pages). */
+async function fetchWithTransientRetry(url, init, providerId, log) {
+  const retryMap = { ...DEFAULT_RETRY_CONFIG, ...(PROVIDERS[providerId]?.retry || {}) };
+  let lastRes = null;
+  let attempt = 0;
+  while (true) {
+    lastRes = await fetch(url, init);
+    if (lastRes.ok) return lastRes;
+    const entry = resolveRetryEntry(retryMap[lastRes.status]);
+    if (!entry.attempts || attempt >= entry.attempts) return lastRes;
+    attempt += 1;
+    log?.debug?.("IMAGE", `Retry ${attempt}/${entry.attempts} after ${lastRes.status} (${entry.delayMs}ms)`);
+    // drain body so connection can close cleanly
+    try { await lastRes.arrayBuffer(); } catch { /* ignore */ }
+    if (entry.delayMs) await sleep(entry.delayMs);
+  }
 }
 
 /**
@@ -107,11 +130,12 @@ export async function handleImageGenerationCore({
 
   let providerResponse;
   try {
-    providerResponse = await fetch(url, {
-      method: "POST",
-      headers,
-      body: serializeRequestBody(requestBody),
-    });
+    providerResponse = await fetchWithTransientRetry(
+      url,
+      { method: "POST", headers, body: serializeRequestBody(requestBody) },
+      provider,
+      log,
+    );
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     log?.debug?.("IMAGE", `Fetch error: ${errMsg}`);
@@ -141,11 +165,12 @@ export async function handleImageGenerationCore({
         const retryBody = await adapter.buildBody(model, body);
         const retryHeaders = adapter.buildHeaders(credentials, retryBody, model, body);
         const retryUrl = adapter.buildUrl(model, credentials);
-        providerResponse = await fetch(retryUrl, {
-          method: "POST",
-          headers: retryHeaders,
-          body: serializeRequestBody(retryBody),
-        });
+        providerResponse = await fetchWithTransientRetry(
+          retryUrl,
+          { method: "POST", headers: retryHeaders, body: serializeRequestBody(retryBody) },
+          provider,
+          log,
+        );
       } catch {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
       }

@@ -25,6 +25,12 @@ export default {
     baseUrl: "https://www.getunikey.ai/v1/chat/completions",
     validateUrl: "https://www.getunikey.ai/v1/models",
     thinkingFormat: "openai",
+    // Image gen sometimes hits CF 504 HTML pages — retry same key before account rotate.
+    retry: {
+      502: { attempts: 3, delayMs: 3000 },
+      503: { attempts: 3, delayMs: 2000 },
+      504: { attempts: 3, delayMs: 4000 },
+    },
     usage: {
       // Bearer: OpenAI-compat billing + New-API per-token usage
       billing: "https://www.getunikey.ai/v1/dashboard/billing/usage",
