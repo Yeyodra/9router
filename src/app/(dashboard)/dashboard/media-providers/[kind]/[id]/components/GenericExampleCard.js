@@ -28,6 +28,64 @@ function toImagePreviewSrc(value) {
   return `data:image/png;base64,${trimmed}`;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Extract async video job id from create response (xAI / UniKey / OpenRouter shapes). */
+function extractVideoJobId(data) {
+  if (!data || typeof data !== "object") return null;
+  return (
+    data.task_id
+    || data.id
+    || data.request_id
+    || data.data?.task_id
+    || data.data?.id
+    || null
+  );
+}
+
+/** Normalize poll payload → { status, progress, videoUrl, failReason, raw }. */
+function normalizeVideoPoll(data) {
+  if (!data || typeof data !== "object") {
+    return { status: "unknown", progress: 0, videoUrl: null, failReason: null, raw: data };
+  }
+  // UniKey New-API wraps under { code, data: { status, progress, data, fail_reason } }
+  const inner = data.data && typeof data.data === "object" && (data.data.status != null || data.data.task_id)
+    ? data.data
+    : data;
+  const status = String(inner.status || data.status || "unknown");
+  let progress = inner.progress ?? data.progress ?? 0;
+  if (typeof progress === "string") {
+    const m = progress.match(/(\d+(?:\.\d+)?)/);
+    progress = m ? Number(m[1]) : 0;
+  }
+  const nested = inner.data && typeof inner.data === "object" ? inner.data : null;
+  const videoUrl =
+    inner.video?.url
+    || inner.url
+    || inner.video_url
+    || nested?.url
+    || nested?.video_url
+    || nested?.video?.url
+    || null;
+  const failReason = inner.fail_reason || inner.error || data.error?.message || null;
+  return { status, progress: Number(progress) || 0, videoUrl, failReason, raw: data };
+}
+
+function isVideoTerminal(status) {
+  return /^(success|succeeded|completed|complete|done|failed|failure|error|cancelled|canceled)$/i.test(
+    String(status || ""),
+  );
+}
+
+function isVideoFailed(status) {
+  return /^(failed|failure|error|cancelled|canceled)$/i.test(String(status || ""));
+}
+
+const VIDEO_POLL_INTERVAL_MS = 4000;
+const VIDEO_POLL_MAX_MS = 10 * 60 * 1000; // 10 min
+
 export function GenericExampleCard({ providerId, kind }) {
   const providerAlias = getProviderAlias(providerId);
   const resolvedId = resolveProviderId(providerAlias);
@@ -199,6 +257,77 @@ export function GenericExampleCard({ providerId, kind }) {
         if (finalData) setResult({ data: finalData, latencyMs });
       } else {
         const data = await res.json();
+        // Async video: create returns queued task — poll until terminal (or timeout).
+        if (kind === "video") {
+          const jobId = extractVideoJobId(data);
+          if (!jobId) {
+            setResult({ data, latencyMs: Date.now() - start });
+            return;
+          }
+          const connHeader =
+            res.headers.get("x-9router-connection-id")
+            || res.headers.get("X-9router-Connection-Id")
+            || pinnedConnectionId
+            || "";
+          setProgress({ stage: "queued", jobId, progress: data.progress ?? 0 });
+          setResult({ data: { ...data, _phase: "submitted" }, latencyMs: Date.now() - start });
+
+          const pollHeaders = { Accept: "application/json" };
+          if (apiKey) pollHeaders.Authorization = `Bearer ${apiKey}`;
+          if (connHeader) pollHeaders["x-connection-id"] = connHeader;
+
+          const deadline = Date.now() + VIDEO_POLL_MAX_MS;
+          let lastPoll = data;
+          while (Date.now() < deadline) {
+            await sleep(VIDEO_POLL_INTERVAL_MS);
+            const pollRes = await fetch(`/api/v1/videos/${encodeURIComponent(jobId)}`, {
+              method: "GET",
+              headers: pollHeaders,
+            });
+            const pollText = await pollRes.text().catch(() => "");
+            let pollJson = null;
+            try { pollJson = pollText ? JSON.parse(pollText) : null; } catch { pollJson = { raw: pollText }; }
+
+            if (!pollRes.ok) {
+              const detail = pollJson?.error?.message || pollJson?.error || pollText || `HTTP ${pollRes.status}`;
+              setError(`Poll failed: ${String(detail).slice(0, 240)}`);
+              setResult({ data: { create: data, poll: pollJson }, latencyMs: Date.now() - start });
+              return;
+            }
+
+            lastPoll = pollJson;
+            const norm = normalizeVideoPoll(pollJson);
+            setProgress({
+              stage: norm.status,
+              jobId,
+              progress: norm.progress,
+              videoUrl: norm.videoUrl,
+            });
+            setResult({
+              data: {
+                job_id: jobId,
+                status: norm.status,
+                progress: norm.progress,
+                video_url: norm.videoUrl,
+                fail_reason: norm.failReason,
+                create: data,
+                poll: pollJson,
+              },
+              latencyMs: Date.now() - start,
+            });
+
+            if (isVideoTerminal(norm.status)) {
+              if (isVideoFailed(norm.status) || norm.failReason) {
+                setError(norm.failReason || `Video job ${norm.status}`);
+              }
+              return;
+            }
+          }
+          setError(`Video still processing after ${Math.round(VIDEO_POLL_MAX_MS / 60000)}m — poll GET /v1/videos/${jobId} manually`);
+          setResult({ data: { job_id: jobId, create: data, last_poll: lastPoll }, latencyMs: Date.now() - start });
+          return;
+        }
+
         const latencyMs = Date.now() - start;
         setResult({ data, latencyMs });
       }
@@ -457,16 +586,18 @@ export function GenericExampleCard({ providerId, kind }) {
               className="flex w-full sm:w-auto items-center justify-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <span className="material-symbols-outlined text-[14px]" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
-                  play_arrow
+                  {running ? "progress_activity" : "play_arrow"}
                 </span>
-                {running ? "Running..." : "Run"}
+                {running
+                  ? (kind === "video" ? `Polling… ${progress?.progress ?? 0}%` : "Running...")
+                  : "Run"}
               </button>
             </div>
           </div>
           <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all">{curlSnippet}</pre>
         </div>
 
-        {/* Streaming progress */}
+        {/* Streaming progress (codex image SSE) */}
         {(running || progress) && useStreaming && (
           <div className="flex flex-col gap-2 px-3 py-2 rounded-lg bg-sidebar border border-border sm:flex-row sm:items-center sm:gap-3">
             <span className="material-symbols-outlined text-[16px] text-primary" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
@@ -476,6 +607,31 @@ export function GenericExampleCard({ providerId, kind }) {
               {progress?.stage || "starting"}
               {!running && progress?.bytesReceived ? ` · ${(progress.bytesReceived / 1024).toFixed(1)} KB` : ""}
             </span>
+          </div>
+        )}
+
+        {/* Async video job progress */}
+        {kind === "video" && (running || progress?.jobId) && (
+          <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-sidebar border border-border">
+            <div className="flex items-center gap-2">
+              <span
+                className="material-symbols-outlined text-[16px] text-primary"
+                style={running ? { animation: "spin 1s linear infinite" } : undefined}
+              >
+                {running ? "progress_activity" : (isVideoFailed(progress?.stage) ? "error" : "check_circle")}
+              </span>
+              <span className="text-xs text-text-muted font-mono truncate">
+                {progress?.stage || "submitted"}
+                {progress?.jobId ? ` · ${progress.jobId}` : ""}
+                {progress?.progress != null ? ` · ${progress.progress}%` : ""}
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-border overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(2, Number(progress?.progress) || 0))}%` }}
+              />
+            </div>
           </div>
         )}
 
@@ -513,6 +669,34 @@ export function GenericExampleCard({ providerId, kind }) {
           <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-70">
             {result ? resultJson : exConfig.defaultResponse}
           </pre>
+          {kind === "video" && result?.data?.video_url && (
+            <div className="mt-2 flex flex-col gap-2">
+              <div className="flex items-center justify-end gap-3">
+                <a
+                  href={result.data.video_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[14px]">open_in_new</span>
+                  Open
+                </a>
+                <a
+                  href={result.data.video_url}
+                  download
+                  className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[14px]">download</span>
+                  Download
+                </a>
+              </div>
+              <video
+                src={result.data.video_url}
+                controls
+                className="max-w-full rounded-lg border border-border bg-black"
+              />
+            </div>
+          )}
           {kind === "image" && (binaryImageUrl || result?.data?.data?.[0]) && (
             <div className="mt-2">
               <div className="flex items-center justify-end mb-1.5">

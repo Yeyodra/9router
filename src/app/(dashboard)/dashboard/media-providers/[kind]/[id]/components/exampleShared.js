@@ -65,7 +65,12 @@ export const KIND_EXAMPLE_CONFIG = {
     inputPlaceholder: "A serene lake at sunset",
     defaultInput: "A serene lake at sunset",
     bodyKey: "prompt",
-    defaultResponse: `{\n  "data": [\n    { "url": "..." }\n  ]\n}`,
+    // Async: create → poll GET /v1/videos/{id} until terminal (UI auto-polls).
+    defaultResponse: `{\n  "job_id": "task_…",\n  "status": "queued|SUCCESS",\n  "progress": 0,\n  "video_url": "https://…"\n}`,
+    extraFields: [
+      { key: "duration", label: "Duration (s)", type: "number", default: 5, min: 1, max: 30 },
+      { key: "aspect_ratio", label: "Aspect", type: "select", default: "16:9", options: ["16:9", "9:16", "1:1", "4:3", "3:4"] },
+    ],
   },
   music: {
     inputLabel: "Prompt",
