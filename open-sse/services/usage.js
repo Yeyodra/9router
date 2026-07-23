@@ -13,6 +13,7 @@ import { getMiniMaxUsage } from "./usage/minimax.js";
 import { getCodeBuddyCnUsage } from "./usage/codebuddy-cn.js";
 import { getGrokCliUsage } from "./usage/grok-cli.js";
 import { getEnterConvergeUsage } from "./usage/enter-converge.js";
+import { getUnikeyUsage } from "./usage/unikey.js";
 import {
   getQwenUsage,
   getIflowUsage,
@@ -47,6 +48,7 @@ const USAGE_HANDLERS = {
   "codebuddy-cn": (c) => getCodeBuddyCnUsage(c.accessToken, c.apiKey, c.providerSpecificData, c.proxyOptions),
   "grok-cli": (c) => getGrokCliUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
   "enter-converge": (c) => getEnterConvergeUsage(c.apiKey, c.providerSpecificData, c.proxyOptions),
+  unikey: (c) => getUnikeyUsage(c.apiKey, c.proxyOptions),
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null) {

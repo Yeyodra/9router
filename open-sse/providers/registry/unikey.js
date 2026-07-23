@@ -25,6 +25,15 @@ export default {
     baseUrl: "https://www.getunikey.ai/v1/chat/completions",
     validateUrl: "https://www.getunikey.ai/v1/models",
     thinkingFormat: "openai",
+    usage: {
+      // Bearer: OpenAI-compat billing + New-API per-token usage
+      billing: "https://www.getunikey.ai/v1/dashboard/billing/usage",
+      token: "https://www.getunikey.ai/api/usage/token",
+    },
+  },
+  features: {
+    usage: true,
+    usageApikey: true,
   },
   // Curated chat-safe seed (MODELS.md 2026-07-22). Live catalogue via modelsFetcher;
   // passthroughModels accepts any id returned by GET /v1/models.
