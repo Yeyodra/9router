@@ -30,9 +30,30 @@ export function sanitizeSecrets(text, credentials = null) {
   return out;
 }
 
+/**
+ * URL layout:
+ *   default (xAI): POST {base}/{action}  GET {base}/{id}
+ *   flat (UniKey): POST {base}           GET {base}/{id}
+ *   optional pollPath: "{base}/generations/{id}" style override
+ */
 function buildUpstreamUrl(config, action, requestId) {
   const base = config.baseUrl.replace(/\/$/, "");
-  return requestId ? `${base}/${encodeURIComponent(requestId)}` : `${base}/${action}`;
+  if (requestId) {
+    if (config.pollPath) {
+      return config.pollPath
+        .replaceAll("{base}", base)
+        .replaceAll("{id}", encodeURIComponent(requestId));
+    }
+    return `${base}/${encodeURIComponent(requestId)}`;
+  }
+  // create
+  if (config.flat || config.noActionSegment) return base;
+  if (config.createPath) {
+    return config.createPath
+      .replaceAll("{base}", base)
+      .replaceAll("{action}", action || "generations");
+  }
+  return `${base}/${action}`;
 }
 
 function buildHeaders({ token, contentType, idempotencyKey }) {

@@ -72,10 +72,18 @@ export default {
     { id: "google/gemini-3-pro-image", name: "Gemini 3 Pro Image", kind: "image", params: ["n", "size"] },
     // Catalog alias; may 403 when account gift quota is exhausted (pre-deduct).
     { id: "gpt-image-2", name: "GPT Image 2", kind: "image", params: ["n", "size"] },
+    // Async video: POST/GET /v1/video/generations[/{task_id}] (Bearer). Live probe 2026-07-23.
+    { id: "bytedance/seedance-2.0-fast", name: "Seedance 2.0 Fast", kind: "video", params: ["duration", "aspect_ratio"] },
+    { id: "kwaivgi/kling-v3.0-pro", name: "Kling v3.0 Pro", kind: "video", params: ["duration", "aspect_ratio"] },
   ],
-  serviceKinds: ["llm", "imageToText", "image"],
+  serviceKinds: ["llm", "imageToText", "image", "video"],
   imageConfig: {
     baseUrl: "https://www.getunikey.ai/v1/images/generations",
+  },
+  // flat: create = baseUrl (no /generations suffix), poll = baseUrl/{task_id}
+  videoConfig: {
+    baseUrl: "https://www.getunikey.ai/v1/video/generations",
+    flat: true,
   },
   modelsFetcher: { url: "https://www.getunikey.ai/v1/models", type: "openai" },
   passthroughModels: true,

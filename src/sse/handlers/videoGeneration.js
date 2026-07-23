@@ -5,7 +5,7 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getProviderConnectionById } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -13,8 +13,8 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
 
-// Video generation is xAI-only today; requests without a provider prefix
-// (bare model id, or multipart bodies we deliberately don't parse) land here.
+// Bare model ids / multipart without provider prefix fall back here (xAI legacy).
+// Prefer "provider/model" (e.g. yk/bytedance/seedance-2.0-fast) + x-connection-id on poll.
 const DEFAULT_VIDEO_PROVIDER = "xai";
 
 // Creation POSTs are billable jobs — only rotate to another account for
@@ -178,6 +178,7 @@ export async function handleVideoCreate(request, action) {
  * GET /v1/videos/{request_id} — poll job status.
  * Jobs are account-bound upstream, so no cross-account rotation here: the
  * caller pins the creating account via `x-connection-id` (returned on create).
+ * Provider is taken from that connection when pinned (unikey/xai/…); else default xai.
  */
 export async function handleVideoGet(request, requestId) {
   const authError = await requireValidApiKey(request);
@@ -185,8 +186,18 @@ export async function handleVideoGet(request, requestId) {
 
   if (!requestId) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id");
 
-  const provider = DEFAULT_VIDEO_PROVIDER;
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
+  let provider = DEFAULT_VIDEO_PROVIDER;
+  if (preferredConnectionId) {
+    try {
+      const conn = await getProviderConnectionById(preferredConnectionId);
+      if (conn?.provider && getVideoConfig(conn.provider)) {
+        provider = conn.provider;
+      }
+    } catch {
+      /* fall through to default */
+    }
+  }
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
   if (!credentials || credentials.allRateLimited) {
