@@ -1,16 +1,65 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import Link from "next/link";
 import { Badge, Button } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider } from "@/shared/constants/providers";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+
+const Editor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
+
+const INSPECTOR_EDITOR_OPTIONS = {
+  readOnly: true,
+  minimap: { enabled: false },
+  fontSize: 12,
+  lineNumbers: "on",
+  scrollBeyondLastLine: false,
+  wordWrap: "on",
+  automaticLayout: true,
+  // ponytail: no custom theme tokens; vs-dark matches playground chrome
+};
 
 const STORAGE_KEYS = {
+  sessions: "playground.sessions",
+  activeSessionId: "playground.activeSessionId",
+  activeProviderId: "playground.activeProviderId",
+  draft: "playground.draft",
+};
+
+const LEGACY_STORAGE_KEYS = {
   sessions: "basic-chat.sessions",
   activeSessionId: "basic-chat.activeSessionId",
   activeProviderId: "basic-chat.activeProviderId",
   draft: "basic-chat.draft",
 };
+
+let playgroundStorageMigrated = false;
+
+function isEmptyStorageValue(value) {
+  return value == null || value === "";
+}
+
+/** One-time: copy basic-chat.* → playground.* when new keys missing/empty. */
+function ensurePlaygroundStorageMigrated() {
+  if (playgroundStorageMigrated || typeof window === "undefined") return;
+  playgroundStorageMigrated = true;
+  try {
+    for (const key of Object.keys(STORAGE_KEYS)) {
+      const nextKey = STORAGE_KEYS[key];
+      const legacyKey = LEGACY_STORAGE_KEYS[key];
+      const current = globalThis.localStorage.getItem(nextKey);
+      if (!isEmptyStorageValue(current)) continue;
+      const legacy = globalThis.localStorage.getItem(legacyKey);
+      if (isEmptyStorageValue(legacy)) continue;
+      globalThis.localStorage.setItem(nextKey, legacy);
+      globalThis.localStorage.removeItem(legacyKey);
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+}
 
 function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -93,6 +142,53 @@ function readAssistantText(chunk) {
   return pieces[0] || "";
 }
 
+function mergeUsage(prev, next) {
+  if (!next || typeof next !== "object") return prev;
+  return {
+    prompt_tokens: next.prompt_tokens ?? prev?.prompt_tokens,
+    completion_tokens: next.completion_tokens ?? prev?.completion_tokens,
+    total_tokens: next.total_tokens ?? prev?.total_tokens,
+  };
+}
+
+function routingFromHeaders(headers) {
+  if (!headers) return null;
+  const provider = headers.get("x-9r-provider");
+  const model = headers.get("x-9r-model");
+  const connectionId = headers.get("x-9r-connection-id");
+  if (!provider && !model && !connectionId) return null;
+  return {
+    provider: provider || undefined,
+    model: model || undefined,
+    connectionId: connectionId || undefined,
+  };
+}
+
+function formatMessageMeta(message) {
+  const parts = [];
+  const routing = message?.routing;
+  if (routing?.provider || routing?.model) {
+    parts.push([routing.provider, routing.model].filter(Boolean).join("/"));
+  }
+  const usage = message?.usage;
+  if (usage && (usage.prompt_tokens != null || usage.completion_tokens != null)) {
+    const prompt = usage.prompt_tokens ?? 0;
+    const completion = usage.completion_tokens ?? 0;
+    parts.push(`${prompt}+${completion} tokens`);
+  } else if (usage?.total_tokens != null) {
+    parts.push(`${usage.total_tokens} tokens`);
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
+function normalizeSession(session) {
+  return {
+    ...session,
+    systemPrompt: typeof session?.systemPrompt === "string" ? session.systemPrompt : "",
+    messages: Array.isArray(session?.messages) ? session.messages.map((message) => ({ ...message })) : [],
+  };
+}
+
 async function fileToDataUrl(file) {
   return await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -103,10 +199,7 @@ async function fileToDataUrl(file) {
 }
 
 function cloneSession(session) {
-  return {
-    ...session,
-    messages: Array.isArray(session.messages) ? session.messages.map((message) => ({ ...message })) : [],
-  };
+  return normalizeSession(session);
 }
 
 function getProviderLabel(connection) {
@@ -149,6 +242,21 @@ function normalizeLiveModel(model, connection) {
   };
 }
 
+// requestModel must be bare combo name — getComboModels rejects provider-style ids with `/`
+function normalizeComboModel(combo) {
+  const name = typeof combo?.name === "string" ? combo.name.trim() : "";
+  if (!name) return null;
+  return {
+    id: `combo:${name}`,
+    requestModel: name,
+    name,
+    providerId: "combo",
+    providerName: "Combo",
+    source: "combo",
+    isCombo: true,
+  };
+}
+
 function parseProviderModelsPayload(data) {
   if (Array.isArray(data?.models)) return data.models;
   if (Array.isArray(data?.data)) return data.data;
@@ -166,31 +274,33 @@ function dedupeModels(models) {
   return Array.from(map.values());
 }
 
-export default function BasicChatPageClient() {
+export default function PlaygroundPageClient() {
+  const { copied, copy } = useCopyToClipboard();
   const [providerGroups, setProviderGroups] = useState([]);
   const [loadingData, setLoadingData] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [sessions, setSessions] = useState(() => {
     if (typeof window === "undefined") return [];
     try {
+      ensurePlaygroundStorageMigrated();
       const saved = safeParse(globalThis.localStorage.getItem(STORAGE_KEYS.sessions), []);
-      return Array.isArray(saved) ? saved.map((session) => ({
-        ...session,
-        messages: Array.isArray(session.messages) ? session.messages : [],
-      })) : [];
+      return Array.isArray(saved) ? saved.map(normalizeSession) : [];
     } catch { return []; }
   });
   const [activeSessionId, setActiveSessionId] = useState(() => {
     if (typeof window === "undefined") return "";
+    ensurePlaygroundStorageMigrated();
     return globalThis.localStorage.getItem(STORAGE_KEYS.activeSessionId) || "";
   });
   const [activeProviderId, setActiveProviderId] = useState(() => {
     if (typeof window === "undefined") return "";
+    ensurePlaygroundStorageMigrated();
     return globalThis.localStorage.getItem(STORAGE_KEYS.activeProviderId) || "";
   });
   const [activeModelId, setActiveModelId] = useState("");
   const [draft, setDraft] = useState(() => {
     if (typeof window === "undefined") return "";
+    ensurePlaygroundStorageMigrated();
     return globalThis.localStorage.getItem(STORAGE_KEYS.draft) || "";
   });
   const [attachments, setAttachments] = useState([]);
@@ -200,6 +310,10 @@ export default function BasicChatPageClient() {
   const [isHydrated, setIsHydrated] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [rawRequest, setRawRequest] = useState("");
+  const [rawResponse, setRawResponse] = useState("");
   const fileInputRef = useRef(null);
   const abortRef = useRef(null);
   const initializedRef = useRef(false);
@@ -207,6 +321,7 @@ export default function BasicChatPageClient() {
   const historyMenuRef = useRef(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only hydration gate
     setIsHydrated(true);
   }, []);
 
@@ -218,21 +333,40 @@ export default function BasicChatPageClient() {
       setLoadError("");
 
       try {
-        const providersRes = await fetch("/api/providers", { cache: "no-store" });
+        const [providersRes, combosRes] = await Promise.all([
+          fetch("/api/providers", { cache: "no-store", credentials: "same-origin" }),
+          fetch("/api/combos", { cache: "no-store", credentials: "same-origin" }),
+        ]);
         const providersData = await providersRes.json().catch(() => ({}));
+        const combosData = combosRes.ok ? await combosRes.json().catch(() => ({})) : {};
         const connections = Array.isArray(providersData.connections)
           ? providersData.connections.filter((connection) => connection?.isActive !== false)
           : [];
+        const comboModels = (Array.isArray(combosData.combos) ? combosData.combos : [])
+          .map(normalizeComboModel)
+          .filter(Boolean)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const comboGroup = comboModels.length > 0
+          ? {
+            providerId: "combo",
+            providerName: "Combos",
+            providerType: "combo",
+            connections: [],
+            models: comboModels,
+          }
+          : null;
 
         if (connections.length === 0) {
           if (!cancelled) {
-            setProviderGroups([]);
-            setLoadError("No providers connected yet.");
+            setProviderGroups(comboGroup ? [comboGroup] : []);
+            setLoadError(comboGroup ? "" : "No providers connected yet. Connect one on the Providers page.");
           }
           return;
         }
 
+        // Model lists are provider-level; keep all connections but fetch once per provider.
         const providerMap = new Map();
+        const uniqueByProvider = new Map();
 
         for (const connection of connections) {
           const providerId = connection.provider || connection.id;
@@ -244,30 +378,50 @@ export default function BasicChatPageClient() {
               : providerId;
 
           if (!providerMap.has(providerId)) {
+            const staticModels = getModelsByProviderId(providerId)
+              .map((model) => normalizeStaticModel(model, connection))
+              .filter(Boolean);
             providerMap.set(providerId, {
               providerId,
               providerName,
               providerType,
               connections: [],
-              models: [],
+              models: staticModels,
             });
+            uniqueByProvider.set(providerId, connection);
           }
 
           const group = providerMap.get(providerId);
           group.providerName = group.providerName || providerName;
           group.providerType = group.providerType || providerType;
           group.connections.push(connection);
-
-          const staticModels = getModelsByProviderId(providerId)
-            .map((model) => normalizeStaticModel(model, connection))
-            .filter(Boolean);
-          group.models.push(...staticModels);
         }
 
+        const buildNormalized = () => {
+          const groups = Array.from(providerMap.values())
+            .map((group) => ({
+              ...group,
+              models: dedupeModels(group.models).sort((a, b) => a.name.localeCompare(b.name)),
+            }))
+            .filter((group) => group.models.length > 0)
+            .sort((a, b) => a.providerName.localeCompare(b.providerName));
+          if (comboGroup) groups.unshift(comboGroup);
+          return groups;
+        };
+
+        // Surface static catalog immediately so the menu is not empty during live fetches.
+        if (!cancelled) {
+          setProviderGroups(buildNormalized());
+        }
+
+        const uniqueConnections = Array.from(uniqueByProvider.values());
         const liveResults = await Promise.all(
-          connections.map(async (connection) => {
+          uniqueConnections.map(async (connection) => {
             try {
-              const response = await fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" });
+              const response = await fetch(`/api/providers/${connection.id}/models`, {
+                cache: "no-store",
+                credentials: "same-origin",
+              });
               const data = await response.json().catch(() => ({}));
               if (!response.ok) return { connection, models: [] };
               const models = parseProviderModelsPayload(data)
@@ -287,23 +441,21 @@ export default function BasicChatPageClient() {
           group.models.push(...result.models);
         }
 
-        const normalized = Array.from(providerMap.values())
-          .map((group) => ({
-            ...group,
-            models: dedupeModels(group.models).sort((a, b) => a.name.localeCompare(b.name)),
-          }))
-          .filter((group) => group.models.length > 0)
-          .sort((a, b) => a.providerName.localeCompare(b.providerName));
+        const normalized = buildNormalized();
 
         if (!cancelled) {
           setProviderGroups(normalized);
           if (normalized.length === 0) {
-            setLoadError("Providers connected but no models available.");
+            setLoadError(
+              comboGroup
+                ? "No provider models available. Combos are listed; add models on Providers if needed."
+                : "Providers connected but no models available. Check Providers or create a Combo.",
+            );
           }
         }
       } catch (error) {
         if (!cancelled) {
-          setLoadError(textValue(error?.message) || "Failed to load providers/models.");
+          setLoadError(textValue(error?.message) || "Failed to load providers/models. Retry or check Providers.");
           setProviderGroups([]);
         }
       } finally {
@@ -337,8 +489,9 @@ export default function BasicChatPageClient() {
       for (const model of group.models) {
         map.set(model.id, {
           ...model,
-          providerId: group.providerId,
-          providerName: group.providerName,
+          providerId: model.providerId || group.providerId,
+          // Keep model-level label ("Combo") when set; group uses "Combos" for the section header
+          providerName: model.providerName || group.providerName,
         });
       }
     }
@@ -375,6 +528,7 @@ export default function BasicChatPageClient() {
     }
   }, [isHydrated, sessions, activeSessionId, activeProviderId, draft]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- bootstrap session after providers load */
   useEffect(() => {
     if (!isHydrated || loadingData || initializedRef.current) return;
     if (providerGroups.length === 0) return;
@@ -403,6 +557,7 @@ export default function BasicChatPageClient() {
       providerName: savedProvider.providerName,
       modelId: savedModel.id,
       modelName: savedModel.name,
+      systemPrompt: "",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: [],
@@ -414,6 +569,7 @@ export default function BasicChatPageClient() {
     setActiveProviderId(savedProvider.providerId);
     setActiveModelId(savedModel.id);
   }, [isHydrated, loadingData, providerGroups, modelIndex, sessions, activeSessionId, activeProviderId, activeModelId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const updateSession = (sessionId, updater) => {
     setSessions((prev) => prev.map((session) => (session.id === sessionId ? updater(cloneSession(session)) : session)));
@@ -428,10 +584,20 @@ export default function BasicChatPageClient() {
       providerName: model.providerName,
       modelId: model.id,
       modelName: model.name,
+      systemPrompt: "",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: [],
     };
+  };
+
+  const setSessionSystemPrompt = (value) => {
+    if (!activeSessionId) return;
+    updateSession(activeSessionId, (session) => ({
+      ...session,
+      systemPrompt: value,
+      updatedAt: new Date().toISOString(),
+    }));
   };
 
   const handleNewChat = () => {
@@ -628,12 +794,26 @@ export default function BasicChatPageClient() {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
-    const requestMessages = nextMessages
+    const conversation = nextMessages
       .filter((message) => !(message.role === "assistant" && message.id === assistantMessageId))
       .map((message) => ({
         role: message.role,
         content: message.role === "user" ? buildUserContent(message) : message.content,
       }));
+    const systemPrompt = textValue(session.systemPrompt).trim();
+    const requestMessages = [
+      ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+      ...conversation,
+    ];
+    const requestBody = {
+      model: model.requestModel || model.id,
+      messages: requestMessages,
+      stream: true,
+    };
+
+    // Inspector: body only — never cookies / Authorization / API keys
+    setRawRequest(JSON.stringify(requestBody, null, 2));
+    setRawResponse("");
 
     try {
       const response = await fetch("/api/dashboard/chat/completions", {
@@ -642,28 +822,58 @@ export default function BasicChatPageClient() {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({
-          model: model.requestModel || model.id,
-          messages: requestMessages,
-          stream: true,
-        }),
+        credentials: "same-origin",
+        body: JSON.stringify(requestBody),
         signal: abortRef.current.signal,
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        try {
+          setRawResponse(JSON.stringify(errorData, null, 2) || `HTTP ${response.status}`);
+        } catch {
+          setRawResponse(`HTTP ${response.status}`);
+        }
         throw new Error(textValue(errorData.error || errorData.message || `Request failed (${response.status})`));
       }
+
+      let usage = null;
+      let routing = routingFromHeaders(response.headers);
+
+      const patchAssistant = (patch) => {
+        updateSession(sessionId, (currentSession) => ({
+          ...currentSession,
+          messages: currentSession.messages.map((message) => (
+            message.id === assistantMessageId ? { ...message, ...patch } : message
+          )),
+          updatedAt: new Date().toISOString(),
+        }));
+      };
 
       const reader = response.body?.getReader();
       if (!reader) {
         const data = await response.json().catch(() => ({}));
+        try {
+          setRawResponse(JSON.stringify(data, null, 2));
+        } catch {
+          setRawResponse(String(data));
+        }
         const fallbackText = textValue(data?.choices?.[0]?.message?.content || data?.output_text || data?.error || data?.message || "");
-        updateSession(sessionId, (currentSession) => ({
-          ...currentSession,
-          messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: fallbackText, status: "done" } : message)),
-          updatedAt: new Date().toISOString(),
-        }));
+        usage = mergeUsage(usage, data?.usage);
+        if (data?.object === "9router.meta") {
+          routing = {
+            provider: data.provider || routing?.provider,
+            model: data.model || routing?.model,
+            connectionId: data.connectionId || routing?.connectionId,
+          };
+          usage = mergeUsage(usage, data.usage);
+        }
+        patchAssistant({
+          content: fallbackText,
+          status: "done",
+          ...(usage ? { usage } : {}),
+          ...(routing ? { routing } : {}),
+        });
         return;
       }
 
@@ -675,7 +885,9 @@ export default function BasicChatPageClient() {
         const { value, done } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        const wireChunk = decoder.decode(value, { stream: true });
+        buffer += wireChunk;
+        setRawResponse((prev) => prev + wireChunk);
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || "";
 
@@ -688,31 +900,75 @@ export default function BasicChatPageClient() {
 
           try {
             const chunk = JSON.parse(payload);
+
+            if (chunk?.object === "9router.meta") {
+              routing = {
+                provider: chunk.provider || routing?.provider,
+                model: chunk.model || routing?.model,
+                connectionId: chunk.connectionId || routing?.connectionId,
+              };
+              usage = mergeUsage(usage, chunk.usage);
+              patchAssistant({
+                content: assistantText,
+                status: "streaming",
+                ...(usage ? { usage } : {}),
+                ...(routing ? { routing } : {}),
+              });
+              continue;
+            }
+
+            usage = mergeUsage(usage, chunk.usage);
             const text = readAssistantText(chunk);
-            if (!text) continue;
+            if (!text) {
+              if (usage || routing) {
+                patchAssistant({
+                  content: assistantText,
+                  status: "streaming",
+                  ...(usage ? { usage } : {}),
+                  ...(routing ? { routing } : {}),
+                });
+              }
+              continue;
+            }
 
             assistantText += text;
             setStreamingText(assistantText);
-            updateSession(sessionId, (currentSession) => ({
-              ...currentSession,
-              messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: assistantText, status: "streaming" } : message)),
-              updatedAt: new Date().toISOString(),
-            }));
+            patchAssistant({
+              content: assistantText,
+              status: "streaming",
+              ...(usage ? { usage } : {}),
+              ...(routing ? { routing } : {}),
+            });
           } catch {
             // Ignore malformed chunks.
           }
         }
       }
 
+      // Flush any trailing decoder bytes into inspector
+      const tail = decoder.decode();
+      if (tail) setRawResponse((prev) => prev + tail);
+
       updateSession(sessionId, (currentSession) => ({
         ...currentSession,
-        messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: assistantText || message.content, status: "done" } : message)),
+        messages: currentSession.messages.map((message) => (
+          message.id === assistantMessageId
+            ? {
+              ...message,
+              content: assistantText || message.content,
+              status: "done",
+              ...(usage ? { usage } : {}),
+              ...(routing ? { routing } : {}),
+            }
+            : message
+        )),
         updatedAt: new Date().toISOString(),
       }));
       finalizeSessionTitle(sessionId, userText);
     } catch (error) {
       if (error.name !== "AbortError") {
         const errorText = textValue(error?.message || error);
+        setRawResponse((prev) => (prev ? `${prev}\n\n// error: ${errorText}` : `// error: ${errorText}`));
         updateSession(sessionId, (currentSession) => ({
           ...currentSession,
           messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: message.content || `Error: ${errorText}`, status: "error" } : message)),
@@ -739,8 +995,9 @@ export default function BasicChatPageClient() {
   const modelSubLabel = activeModel ? activeModel.requestModel : "Choose from connected providers";
 
   return (
-    <div className="relative flex-1 flex flex-col h-full min-h-0 min-w-0 bg-[#212121] text-white overflow-hidden">
-      <div className="relative mx-auto flex flex-1 h-full min-h-0 w-full max-w-4xl flex-col">
+    <div className="relative flex flex-1 flex-col h-full min-h-0 min-w-0 bg-[#212121] text-white overflow-hidden">
+      {/* flex-1 min-h-0 (no h-full) so bottom inspector can claim space without clipping */}
+      <div className="relative mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
         <div className="flex shrink-0 items-center justify-between gap-3 px-4 py-3 lg:px-6">
           <div ref={modelMenuRef} className="relative">
             <button
@@ -761,7 +1018,7 @@ export default function BasicChatPageClient() {
               <div className="absolute left-0 top-[calc(100%+10px)] z-30 w-[min(520px,calc(100vw-2rem))] overflow-hidden rounded-[20px] border border-white/10 bg-[#262626] shadow-2xl shadow-black/50">
                 <div className="border-b border-white/10 px-4 py-3">
                   <p className="text-xs uppercase tracking-[0.22em] text-white/45">Models</p>
-                  <p className="text-sm text-white/75">Only from connected providers</p>
+                  <p className="text-sm text-white/75">Connected providers and combos</p>
                 </div>
                 <div className="max-h-[60vh] overflow-y-auto p-2 custom-scrollbar">
                   {providerGroups.map((group) => (
@@ -799,6 +1056,15 @@ export default function BasicChatPageClient() {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setInspectorOpen((value) => !value)}
+              className={`rounded-2xl border px-4 py-3 text-sm transition ${inspectorOpen ? "border-blue-400/40 bg-blue-500/15 text-white" : "border-white/10 bg-white/5 text-white/80 hover:bg-white/8"}`}
+              aria-pressed={inspectorOpen}
+              title="Toggle raw request/response inspector"
+            >
+              Debug
+            </button>
             <button
               type="button"
               onClick={() => setHistoryOpen((value) => !value)}
@@ -847,10 +1113,29 @@ export default function BasicChatPageClient() {
         ) : null}
 
         {loadError ? (
-          <div className="mt-4 rounded-[18px] border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-rose-100">
+          <div className="mt-4 mx-4 lg:mx-6 rounded-[18px] border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-rose-100">
             <div className="flex items-start gap-3">
-              <span className="material-symbols-outlined text-[20px]">error</span>
-              <p className="text-sm leading-6">{loadError}</p>
+              <span className="material-symbols-outlined text-[20px] shrink-0">error</span>
+              <div className="min-w-0 space-y-2">
+                <p className="text-sm leading-6 break-words">{loadError}</p>
+                <div className="flex flex-wrap gap-2">
+                  {/provider|model|load/i.test(loadError) ? (
+                    <Link href="/dashboard/providers" className="rounded-full border border-rose-300/30 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-500/25">
+                      Providers
+                    </Link>
+                  ) : null}
+                  {/combo/i.test(loadError) ? (
+                    <Link href="/dashboard/combos" className="rounded-full border border-rose-300/30 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-500/25">
+                      Combos
+                    </Link>
+                  ) : null}
+                  {/api key|endpoint|no active/i.test(loadError) ? (
+                    <Link href="/dashboard/endpoint" className="rounded-full border border-rose-300/30 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-500/25">
+                      Endpoint & Key
+                    </Link>
+                  ) : null}
+                </div>
+              </div>
             </div>
           </div>
         ) : null}
@@ -861,14 +1146,35 @@ export default function BasicChatPageClient() {
               <div className="flex min-h-[50vh] items-center justify-center px-4 text-center">
                 <div className="max-w-xl space-y-4">
                   <div className="mx-auto flex size-16 items-center justify-center rounded-[20px] border border-white/10 bg-white/5 text-white/80">
-                    <span className="material-symbols-outlined text-[30px]">chat</span>
+                    <span className="material-symbols-outlined text-[30px]">
+                      {!loadingData && providerGroups.length === 0 ? "cloud_off" : "chat"}
+                    </span>
                   </div>
                   <div className="space-y-2">
-                    <h2 className="text-2xl font-semibold text-white">Start a conversation</h2>
+                    <h2 className="text-2xl font-semibold text-white">
+                      {!loadingData && providerGroups.length === 0
+                        ? "Nothing to chat with yet"
+                        : "Start a conversation"}
+                    </h2>
                     <p className="text-sm leading-6 text-white/60">
-                      Simple chat interface to interact with any AI model from connected providers. Select a model and start chatting!
+                      {!loadingData && providerGroups.length === 0
+                        ? "Connect a provider, create a combo, or add an API key — then pick a model here."
+                        : "Select a model (or combo) and start chatting. Use the inspector for raw request/response."}
                     </p>
                   </div>
+                  {!loadingData && providerGroups.length === 0 ? (
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <Link href="/dashboard/providers" className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-xs font-medium text-white hover:bg-white/15">
+                        Providers
+                      </Link>
+                      <Link href="/dashboard/combos" className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-xs font-medium text-white hover:bg-white/15">
+                        Combos
+                      </Link>
+                      <Link href="/dashboard/endpoint" className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-xs font-medium text-white hover:bg-white/15">
+                        Endpoint & Key
+                      </Link>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -879,6 +1185,7 @@ export default function BasicChatPageClient() {
                 const isAssistant = message.role === "assistant";
                 const isStreaming = isAssistant && message.id === streamingMessageId && message.status === "streaming";
                 const content = textValue(message.content) || (isAssistant ? streamingText : "");
+                const metaLine = isAssistant ? formatMessageMeta(message) : "";
 
                 return (
                   <div key={message.id} className={`flex w-full ${isUser ? "justify-end" : "justify-start"} mb-6`}>
@@ -901,6 +1208,9 @@ export default function BasicChatPageClient() {
                         {content}
                         {isAssistant && isStreaming && !streamingText ? <span className="inline-block animate-pulse">▋</span> : null}
                       </div>
+                      {metaLine ? (
+                        <p className="mt-2 text-[11px] leading-4 text-white/40">{metaLine}</p>
+                      ) : null}
                     </div>
                   </div>
                 );
@@ -923,6 +1233,33 @@ export default function BasicChatPageClient() {
             ) : null}
 
             <div className="mx-auto w-full max-w-3xl px-4 pb-2">
+              <div className="mb-2 rounded-[18px] border border-white/10 bg-white/5">
+                <button
+                  type="button"
+                  onClick={() => setSystemPromptOpen((open) => !open)}
+                  className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+                >
+                  <span className="text-xs font-medium text-white/60">
+                    System prompt{currentSession?.systemPrompt?.trim() ? " · set" : ""}
+                  </span>
+                  <span className="material-symbols-outlined text-[18px] text-white/45">
+                    {systemPromptOpen ? "expand_less" : "expand_more"}
+                  </span>
+                </button>
+                {systemPromptOpen ? (
+                  <div className="border-t border-white/10 px-3 pb-3 pt-2">
+                    <textarea
+                      value={currentSession?.systemPrompt || ""}
+                      onChange={(event) => setSessionSystemPrompt(event.target.value)}
+                      placeholder="Optional system instructions for this session"
+                      rows={3}
+                      disabled={!currentSession}
+                      className="w-full resize-y rounded-[12px] border border-white/10 bg-black/20 px-3 py-2 text-[13px] leading-5 text-white outline-none placeholder:text-white/35 custom-scrollbar max-h-[20vh]"
+                    />
+                  </div>
+                ) : null}
+              </div>
+
               <div className="rounded-[26px] bg-[#2f2f2f] px-3 pt-3 pb-2 shadow-[0_0_15px_rgba(0,0,0,0.10)] ring-1 ring-white/5">
                 <textarea
                   value={draft}
@@ -961,6 +1298,95 @@ export default function BasicChatPageClient() {
             Model list is filtered from connected providers.
           </p>
         </div>
+      </div>
+
+      <div className="shrink-0 border-t border-white/10 bg-[#1a1a1a]">
+        <div className={`flex items-center justify-between gap-3 px-4 py-2${inspectorOpen ? " border-b border-white/10" : ""}`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-outlined text-[18px] text-white/55">terminal</span>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/55">Inspector</p>
+            <span className="truncate text-[11px] text-white/35">last request / raw SSE · no secrets</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {inspectorOpen ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => { if (rawRequest) copy(rawRequest, "req"); }}
+                  disabled={!rawRequest}
+                  className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 transition hover:bg-white/10 disabled:opacity-40"
+                >
+                  {copied === "req" ? "Copied" : "Copy req"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { if (rawResponse) copy(rawResponse, "res"); }}
+                  disabled={!rawResponse}
+                  className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 transition hover:bg-white/10 disabled:opacity-40"
+                >
+                  {copied === "res" ? "Copied" : "Copy res"}
+                </button>
+              </>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setInspectorOpen((value) => !value)}
+              className="rounded-lg border border-white/10 bg-white/5 p-1 text-white/55 transition hover:bg-white/10 hover:text-white"
+              aria-label={inspectorOpen ? "Collapse inspector" : "Expand inspector"}
+              aria-expanded={inspectorOpen}
+            >
+              <span className="material-symbols-outlined text-[18px]">{inspectorOpen ? "expand_more" : "expand_less"}</span>
+            </button>
+          </div>
+        </div>
+        {inspectorOpen ? (
+          <div className="grid grid-cols-1 divide-y divide-white/10 md:grid-cols-2 md:divide-x md:divide-y-0">
+            <div className="flex min-h-0 flex-col">
+              <div className="flex items-center justify-between px-3 py-1.5">
+                <span className="text-[11px] font-medium text-white/50">Request</span>
+                <Badge size="sm" variant="default">JSON</Badge>
+              </div>
+              <div className="overflow-hidden border-t border-white/5">
+                {rawRequest ? (
+                  <Editor
+                    height="220px"
+                    defaultLanguage="json"
+                    language="json"
+                    value={rawRequest}
+                    theme="vs-dark"
+                    options={INSPECTOR_EDITOR_OPTIONS}
+                  />
+                ) : (
+                  <pre className="h-[220px] overflow-auto px-3 py-2 font-mono text-[11px] leading-5 text-white/35 custom-scrollbar">
+                    Send a message to capture the outbound body.
+                  </pre>
+                )}
+              </div>
+            </div>
+            <div className="flex min-h-0 flex-col">
+              <div className="flex items-center justify-between px-3 py-1.5">
+                <span className="text-[11px] font-medium text-white/50">Response</span>
+                <Badge size="sm" variant="default">SSE</Badge>
+              </div>
+              <div className="overflow-hidden border-t border-white/5">
+                {rawResponse ? (
+                  <Editor
+                    height="220px"
+                    defaultLanguage="plaintext"
+                    language="plaintext"
+                    value={rawResponse}
+                    theme="vs-dark"
+                    options={INSPECTOR_EDITOR_OPTIONS}
+                  />
+                ) : (
+                  <pre className="h-[220px] overflow-auto px-3 py-2 font-mono text-[11px] leading-5 text-white/35 custom-scrollbar">
+                    Wire SSE text appears here as the stream arrives.
+                  </pre>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

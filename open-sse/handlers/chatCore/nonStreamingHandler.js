@@ -9,6 +9,7 @@ import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
+import { isPlaygroundRequest, playgroundRoutingHeaders } from "./playgroundMeta.js";
 
 function parseToolArguments(value) {
   if (!value) return {};
@@ -303,10 +304,15 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     console.error("[RequestDetail] Failed to save:", err.message);
   });
 
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    ...(isPlaygroundRequest(clientRawRequest)
+      ? playgroundRoutingHeaders({ provider, model, connectionId })
+      : {}),
+  };
   return {
     success: true,
-    response: new Response(JSON.stringify(translatedResponse), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-    })
+    response: new Response(JSON.stringify(translatedResponse), { headers }),
   };
 }

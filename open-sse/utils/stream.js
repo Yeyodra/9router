@@ -5,6 +5,7 @@ import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBu
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
+import { buildPlaygroundMeta, formatPlaygroundMetaSSE } from "../handlers/chatCore/playgroundMeta.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
@@ -35,6 +36,7 @@ const STREAM_MODE = {
  * @param {object} options.body - Request body (for input token estimation)
  * @param {function} options.onStreamComplete - Callback when stream completes (content, usage)
  * @param {string} options.apiKey - API key for usage tracking
+ * @param {boolean} options.playgroundMeta - When true (x-9r-playground), emit 9router.meta SSE events
  */
 export function createSSEStream(options = {}) {
   const {
@@ -48,7 +50,8 @@ export function createSSEStream(options = {}) {
     connectionId = null,
     body = null,
     onStreamComplete = null,
-    apiKey = null
+    apiKey = null,
+    playgroundMeta = false
   } = options;
 
   let buffer = "";
@@ -72,8 +75,27 @@ export function createSSEStream(options = {}) {
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
+  let playgroundMetaFinalSent = false;
+
+  const emitPlaygroundMeta = (controller, withUsage) => {
+    if (!playgroundMeta) return;
+    const meta = buildPlaygroundMeta({
+      provider,
+      model,
+      connectionId,
+      usage: withUsage ? (mode === STREAM_MODE.TRANSLATE ? state?.usage : usage) : null
+    });
+    const out = formatPlaygroundMetaSSE(meta);
+    reqLogger?.appendConvertedChunk?.(out);
+    controller.enqueue(sharedEncoder.encode(out));
+    if (withUsage) playgroundMetaFinalSent = true;
+  };
 
   return new TransformStream({
+    // Early routing meta so playground UI can show provider/account before first token
+    start(controller) {
+      emitPlaygroundMeta(controller, false);
+    },
     transform(chunk, controller) {
       if (!ttftAt) ttftAt = Date.now();
       const text = decoder.decode(chunk, { stream: true });
@@ -361,6 +383,9 @@ export function createSSEStream(options = {}) {
           } else {
             appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
           }
+
+          // Final 9router.meta (with usage) before [DONE] — playground only
+          if (!playgroundMetaFinalSent) emitPlaygroundMeta(controller, true);
           
           // IMPORTANT: In passthrough mode we still must terminate the SSE stream.
           // Some clients (e.g. OpenClaw) expect the OpenAI-style sentinel:
@@ -450,6 +475,9 @@ export function createSSEStream(options = {}) {
         } else {
           appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
         }
+
+        // Final 9router.meta (with usage) — playground only; after finish chunks, before stream ends
+        if (!playgroundMetaFinalSent) emitPlaygroundMeta(controller, true);
         
         if (onStreamComplete) {
           onStreamComplete({
@@ -464,7 +492,7 @@ export function createSSEStream(options = {}) {
   });
 }
 
-export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null) {
+export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, playgroundMeta = false) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
     targetFormat,
@@ -476,11 +504,12 @@ export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, p
     connectionId,
     body,
     onStreamComplete,
-    apiKey
+    apiKey,
+    playgroundMeta
   });
 }
 
-export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null) {
+export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, playgroundMeta = false) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,
     provider,
@@ -489,6 +518,7 @@ export function createPassthroughStreamWithLogger(provider = null, reqLogger = n
     connectionId,
     body,
     onStreamComplete,
-    apiKey
+    apiKey,
+    playgroundMeta
   });
 }
