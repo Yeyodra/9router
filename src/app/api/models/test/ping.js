@@ -101,6 +101,36 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return { ok: true, latencyMs, error: null, status: res.status };
   }
 
+  // Async video job create (POST returns task_id / request_id / id). Don't poll to completion.
+  if (kind === "video") {
+    const res = await fetch(`${baseUrl}/api/v1/videos/generations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        prompt: "test video clip",
+        duration: 5,
+        aspect_ratio: "16:9",
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const latencyMs = Date.now() - start;
+    const rawText = await res.text().catch(() => "");
+    let parsed = null;
+    try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+
+    if (!res.ok) {
+      const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
+      return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 240)}` : ""}`, status: res.status };
+    }
+
+    const jobId = parsed?.task_id || parsed?.id || parsed?.request_id || parsed?.data?.task_id;
+    if (!jobId) {
+      return { ok: false, latencyMs, status: res.status, error: "Provider returned no video job id" };
+    }
+    return { ok: true, latencyMs, error: null, status: res.status, jobId };
+  }
+
   if (kind === "stt") {
     const form = new FormData();
     const sampleAudio = createSilentWavFile();

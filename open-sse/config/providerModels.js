@@ -56,9 +56,11 @@ export function getModelTargetFormat(aliasOrId, modelId) {
 }
 
 export function getModelType(aliasOrId, modelId) {
-  const models = PROVIDER_MODELS[aliasOrId];
+  // PROVIDER_MODELS is keyed by alias; accept provider id too (unikey → yk).
+  const alias = PROVIDER_ID_TO_ALIAS[aliasOrId] || aliasOrId;
+  const models = PROVIDER_MODELS[alias] || PROVIDER_MODELS[aliasOrId];
   if (!models) return null;
-  const found = findModel(models, modelId, aliasOrId);
+  const found = findModel(models, modelId, alias);
   return found?.kind || found?.type || null;
 }
 
