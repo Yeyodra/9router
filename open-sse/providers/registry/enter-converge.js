@@ -63,11 +63,11 @@ export default {
     // Anthropic Claude (OK on ek_)
     { id: "anthropic/claude-opus-4.6",   name: "Claude Opus 4.6" },
     { id: "anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5" },
-    // [502] upstream gateway down for ek_ completions:
-    // { id: "anthropic/claude-opus-4.8",   name: "Claude Opus 4.8" },
-    // { id: "anthropic/claude-opus-4.7",   name: "Claude Opus 4.7" },
-    // { id: "anthropic/claude-sonnet-5",   name: "Claude Sonnet 5" },
-    // { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6" },
+    // Project-chat only (502 on /chat/completions, OK via project path with JWT)
+    { id: "anthropic/claude-opus-4.8",   name: "Claude Opus 4.8",   projectChat: true },
+    { id: "anthropic/claude-opus-4.7",   name: "Claude Opus 4.7",   projectChat: true },
+    { id: "anthropic/claude-sonnet-5",   name: "Claude Sonnet 5",   projectChat: true },
+    { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6", projectChat: true },
     // MiniMax
     { id: "minimax/minimax-m3",   name: "MiniMax M3" },
     { id: "minimax/minimax-m2.7", name: "MiniMax M2.7" },
@@ -80,6 +80,7 @@ export default {
     { id: "alibaba/qwen-3.6-plus",        name: "Qwen 3.6 Plus" },
     { id: "alibaba/qwen-3.6-max-preview", name: "Qwen 3.6 Max Preview" },
     // Moonshot Kimi
+    { id: "moonshotai/kimi-k3",        name: "Kimi K3" },
     { id: "moonshotai/kimi-k2.7-code", name: "Kimi K2.7 Code" },
     { id: "moonshotai/kimi-k2.6",      name: "Kimi K2.6" },
     { id: "moonshotai/kimi-k2.5",      name: "Kimi K2.5" },
@@ -87,9 +88,9 @@ export default {
     { id: "z-ai/glm-5.2", name: "GLM 5.2" },
     { id: "z-ai/glm-5.1", name: "GLM 5.1" },
     { id: "z-ai/glm-5",   name: "GLM 5" },
-    // Google Gemini [502 — upstream gateway down for ek_]:
-    // { id: "google/gemini-3.5-flash",              name: "Gemini 3.5 Flash" },
-    // { id: "google/gemini-3.1-pro-preview",        name: "Gemini 3.1 Pro Preview" },
-    // { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite" },
+    // Google Gemini (project-chat only — 502 on /chat/completions)
+    { id: "google/gemini-3.5-flash",              name: "Gemini 3.5 Flash",     projectChat: true },
+    { id: "google/gemini-3.1-pro-preview",        name: "Gemini 3.1 Pro Preview", projectChat: true },
+    { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite", projectChat: true },
   ],
 };

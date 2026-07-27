@@ -12,6 +12,8 @@ import {
   resolveEnterConvergeWorkspaceIdSync,
   cacheEnterConvergeWorkspaceId,
 } from "../providers/enter-converge-workspace.js";
+import { executeProjectChat, isProjectChatModel } from "../providers/enter-converge-project-chat.js";
+import { PROVIDER_MODELS } from "../providers/index.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -91,7 +93,7 @@ export class DefaultExecutor extends BaseExecutor {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
-  // Enter Converge: resolve workspaceId from ek_ when not stored (farm keys only).
+  // Enter Converge: resolve workspaceId + project-chat routing for 502 models.
   async execute(args) {
     if (this.provider === "enter-converge") {
       const creds = args?.credentials;
@@ -109,6 +111,23 @@ export class DefaultExecutor extends BaseExecutor {
             creds.providerSpecificData.workspaceId = ws;
           }
         }
+      }
+
+      // Route projectChat models via project-based chat (bypasses 502 gateway)
+      const modelsList = PROVIDER_MODELS["ec"] || PROVIDER_MODELS["enter-converge"];
+      if (isProjectChatModel(this.provider, args?.model, modelsList)) {
+        const result = await executeProjectChat({
+          model: args.model,
+          body: args.body,
+          credentials: creds,
+          proxyOptions: args.proxyOptions || null,
+          log: args.log,
+        });
+        if (result.error) {
+          const errBody = JSON.stringify({ error: result.error });
+          return { response: new Response(errBody, { status: result.error.status, headers: { "Content-Type": "application/json" } }) };
+        }
+        return result;
       }
     }
     return super.execute(args);
