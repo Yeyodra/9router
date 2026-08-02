@@ -874,8 +874,17 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         if (res.status === 401 || res.status === 403) return { valid: false, error: "Invalid API key" };
         return { valid: false, error: `UniKey probe failed (${res.status})` };
       }
+      case "tasklet": {
+        const res = await fetchWithConnectionProxy("https://api.tasklet.ai/api/profile", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${connection.apiKey}`, "Content-Type": "application/json" },
+          body: "null",
+        }, effectiveProxy);
+        if (res.status === 401 || res.status === 403) return { valid: false, error: "Invalid session token" };
+        if (!res.ok) return { valid: false, error: `Tasklet probe failed (${res.status})` };
+        return { valid: true, error: null };
+      }
       default: {
-        // Generic: any registry provider with validateUrl + Bearer api key
         const validateUrl = PROVIDERS[connection.provider]?.validateUrl;
         if (validateUrl && connection.apiKey) {
           const res = await fetchWithConnectionProxy(validateUrl, {

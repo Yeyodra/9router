@@ -2,6 +2,8 @@ import { getProviderConnections, validateApiKey, updateProviderConnection, getSe
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { isProjectChatModel } from "open-sse/providers/enter-converge-project-chat.js";
+import { PROVIDER_MODELS } from "open-sse/config/providerModels.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
@@ -67,10 +69,20 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
+    // For Enter Converge projectChat models, only pick connections with JWT or refreshToken
+    const needsJwt = providerId === "enter-converge" && model &&
+      isProjectChatModel("enter-converge", model, PROVIDER_MODELS["ec"] || PROVIDER_MODELS["enter-converge"]);
+
     // Filter out model-locked and excluded connections
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      // Skip connections without JWT capability for projectChat models
+      if (needsJwt) {
+        const hasJwt = c.accessToken?.startsWith?.("eyJ");
+        const hasRefresh = !!c.refreshToken;
+        if (!hasJwt && !hasRefresh) return false;
+      }
       return true;
     });
 

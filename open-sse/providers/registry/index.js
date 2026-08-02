@@ -102,6 +102,8 @@ import p99 from "./xai.js";
 import p100 from "./xiaomi-mimo.js";
 import p101 from "./xiaomi-tokenplan.js";
 import p102 from "./youcom.js";
+import p103 from "./screenpipe.js";
+import p104 from "./tasklet.js";
 
 export default [
   p0,
@@ -206,5 +208,7 @@ export default [
   p99,
   p100,
   p101,
-  p102
+  p102,
+  p103,
+  p104
 ];

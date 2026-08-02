@@ -20,6 +20,8 @@ import { CommandCodeExecutor } from "./commandcode.js";
 import { XiaomiTokenplanExecutor } from "./xiaomi-tokenplan.js";
 import { MimoFreeExecutor } from "./mimo-free.js";
 import { CodeBuddyExecutor } from "./codebuddy-cn.js";
+import { ScreenPipeExecutor } from "./screenpipe.js";
+import { TaskletExecutor } from "./tasklet.js";
 import { DefaultExecutor } from "./default.js";
 
 // DashScope-intl (Qwen Cloud) caps max_tokens at 16384.
@@ -68,6 +70,10 @@ const executors = {
   "mimo-free": new MimoFreeExecutor(),
   mmf: new MimoFreeExecutor(), // Alias for mimo-free
   "codebuddy-cn": new CodeBuddyExecutor(),
+  screenpipe: new ScreenPipeExecutor(),
+  sp: new ScreenPipeExecutor(), // Alias
+  tasklet: new TaskletExecutor(),
+  tl: new TaskletExecutor(), // Alias
 };
 
 const defaultCache = new Map();
@@ -106,3 +112,5 @@ export { CommandCodeExecutor } from "./commandcode.js";
 export { XiaomiTokenplanExecutor } from "./xiaomi-tokenplan.js";
 export { MimoFreeExecutor } from "./mimo-free.js";
 export { CodeBuddyExecutor } from "./codebuddy-cn.js";
+export { ScreenPipeExecutor } from "./screenpipe.js";
+export { TaskletExecutor } from "./tasklet.js";

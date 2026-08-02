@@ -118,7 +118,7 @@ export class DefaultExecutor extends BaseExecutor {
       if (isProjectChatModel(this.provider, args?.model, modelsList)) {
         const result = await executeProjectChat({
           model: args.model,
-          body: args.body,
+          body: { ...args.body, stream: args.stream ?? args.body?.stream },
           credentials: creds,
           proxyOptions: args.proxyOptions || null,
           log: args.log,

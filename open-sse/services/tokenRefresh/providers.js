@@ -622,3 +622,153 @@ export async function refreshCodebuddyToken(refreshToken, log) {
     };
   }, log);
 }
+
+// ── ScreenPipe (Clerk-based JWT, 60s TTL) ───────────────────────────────────
+const SCREENPIPE_CLERK_BASE = "https://clerk.screenpipe.com";
+const SCREENPIPE_CLERK_JS = "5.56.0";
+const SCREENPIPE_ORIGIN = "https://screenpipe.com";
+const SCREENPIPE_BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+
+export async function refreshScreenpipeToken(refreshToken, providerSpecificData, log) {
+  const email = providerSpecificData?.email;
+  const password = providerSpecificData?.password;
+  // refreshToken = sessionId (stored by connect route); providerSpecificData.sessionId as fallback
+  const sessionId = refreshToken || providerSpecificData?.sessionId;
+
+  if (!sessionId && (!email || !password)) {
+    log?.warn?.("TOKEN_REFRESH", "ScreenPipe: no sessionId and no email/password for re-auth");
+    return null;
+  }
+
+  return dedupRefresh("screenpipe", email || sessionId, async () => {
+    try {
+      const clerkHeaders = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+        Origin: SCREENPIPE_ORIGIN,
+        Referer: `${SCREENPIPE_ORIGIN}/`,
+        "User-Agent": SCREENPIPE_BROWSER_UA,
+      };
+
+      // ── Step 0: Init Clerk client session (required for __client cookie) ──
+      // Clerk rejects sign-in/token requests without a valid client cookie.
+      // Extract Set-Cookie from the init response and forward to all subsequent calls.
+      const clientInitRes = await proxyAwareFetch(
+        `${SCREENPIPE_CLERK_BASE}/v1/client?_clerk_js_version=${SCREENPIPE_CLERK_JS}`,
+        { method: "GET", headers: { Accept: "application/json", Origin: SCREENPIPE_ORIGIN, Referer: `${SCREENPIPE_ORIGIN}/`, "User-Agent": SCREENPIPE_BROWSER_UA } }
+      );
+
+      // Forward __client cookie from init response
+      const setCookieHeaders = clientInitRes.headers?.getSetCookie?.()
+        || (clientInitRes.headers?.raw?.()?.["set-cookie"])
+        || [clientInitRes.headers?.get?.("set-cookie")].filter(Boolean);
+      const clientCookie = (Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders])
+        .filter(Boolean)
+        .map((c) => c.split(";")[0])
+        .join("; ");
+
+      const authedHeaders = { ...clerkHeaders };
+      if (clientCookie) {
+        authedHeaders.Cookie = clientCookie;
+      }
+
+      let activeSessionId = sessionId;
+
+      if (activeSessionId) {
+        const tokenRes = await proxyAwareFetch(
+          `${SCREENPIPE_CLERK_BASE}/v1/client/sessions/${activeSessionId}/tokens?_clerk_js_version=${SCREENPIPE_CLERK_JS}`,
+          { method: "POST", headers: authedHeaders, body: "" }
+        );
+
+        if (tokenRes.ok) {
+          const tokenData = await tokenRes.json();
+          if (tokenData?.jwt) {
+            log?.info?.("TOKEN_REFRESH", "ScreenPipe JWT minted from session", { expiresIn: 60 });
+            return {
+              accessToken: tokenData.jwt,
+              expiresIn: 60,
+              refreshToken: activeSessionId,
+              providerSpecificData: { email, password, sessionId: activeSessionId },
+            };
+          }
+        }
+        log?.warn?.("TOKEN_REFRESH", "ScreenPipe session expired, re-authenticating");
+      }
+
+      if (!email || !password) {
+        log?.error?.("TOKEN_REFRESH", "ScreenPipe: session expired and no credentials for re-auth");
+        return { error: "session_expired" };
+      }
+
+      const signInRes = await proxyAwareFetch(
+        `${SCREENPIPE_CLERK_BASE}/v1/client/sign_ins?_clerk_js_version=${SCREENPIPE_CLERK_JS}`,
+        {
+          method: "POST",
+          headers: authedHeaders,
+          body: new URLSearchParams({ identifier: email, strategy: "password", password }),
+        }
+      );
+
+      if (!signInRes.ok) {
+        const errText = await signInRes.text();
+        log?.error?.("TOKEN_REFRESH", "ScreenPipe sign-in failed", {
+          status: signInRes.status,
+          error: errText.slice(0, 300),
+        });
+        return null;
+      }
+
+      const signInData = await signInRes.json();
+      const newSessionId =
+        signInData?.response?.created_session_id ||
+        signInData?.client?.sessions?.[0]?.id ||
+        "";
+
+      if (!newSessionId) {
+        log?.error?.("TOKEN_REFRESH", "ScreenPipe: no session_id in sign-in response");
+        return null;
+      }
+
+      // Forward cookies from sign-in response (Clerk may rotate __client)
+      const signInCookies = signInRes.headers?.getSetCookie?.()
+        || (signInRes.headers?.raw?.()?.["set-cookie"])
+        || [signInRes.headers?.get?.("set-cookie")].filter(Boolean);
+      const updatedCookie = (Array.isArray(signInCookies) ? signInCookies : [signInCookies])
+        .filter(Boolean)
+        .map((c) => c.split(";")[0])
+        .join("; ");
+      const tokenHeaders = { ...authedHeaders };
+      if (updatedCookie) {
+        tokenHeaders.Cookie = updatedCookie;
+      }
+
+      const tokenRes = await proxyAwareFetch(
+        `${SCREENPIPE_CLERK_BASE}/v1/client/sessions/${newSessionId}/tokens?_clerk_js_version=${SCREENPIPE_CLERK_JS}`,
+        { method: "POST", headers: tokenHeaders, body: "" }
+      );
+
+      if (!tokenRes.ok) {
+        log?.error?.("TOKEN_REFRESH", "ScreenPipe: failed to mint JWT from new session");
+        return null;
+      }
+
+      const tokenData = await tokenRes.json();
+      if (!tokenData?.jwt) {
+        log?.error?.("TOKEN_REFRESH", "ScreenPipe: empty JWT after re-auth");
+        return null;
+      }
+
+      log?.info?.("TOKEN_REFRESH", "ScreenPipe re-authenticated + JWT minted", { expiresIn: 60 });
+      return {
+        accessToken: tokenData.jwt,
+        expiresIn: 60,
+        refreshToken: newSessionId,
+        providerSpecificData: { email, password, sessionId: newSessionId },
+      };
+    } catch (error) {
+      log?.error?.("TOKEN_REFRESH", `ScreenPipe refresh error: ${error.message}`);
+      return null;
+    }
+  }, log);
+}

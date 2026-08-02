@@ -291,38 +291,82 @@ export async function executeProjectChat({ model, body, credentials, proxyOption
     return { error: { status: 504, message: "project chat timeout (60s)" } };
   }
 
-  // Step 3: Get response content from thread/turns
+  // Step 3: Get response content
+  // Turns don't contain message text — content is stored as project files (git commits).
+  // Try: /projects/{pid}/files then read the main file content.
   const turnsRes = await apiFetch(`/projects/${projectId}/thread/turns`, token, ws, {}, proxyOptions);
   let assistantContent = chatName; // fallback to auto-title
 
-  if (turnsRes.ok && turnsRes.data?.data?.turns) {
-    const turns = turnsRes.data.data.turns;
-    // Find assistant turn(s)
-    for (const turn of turns) {
-      if (turn.role === "assistant" || turn.type === "response") {
-        // Content may be in various fields
-        const content = turn.content || turn.text || turn.message || turn.output || "";
+  const turns = turnsRes.ok ? (turnsRes.data?.data?.turns || []) : [];
+  const turn = turns[0];
+
+  // Try fetching project files (response written as file)
+  const filesRes = await apiFetch(`/projects/${projectId}/files`, token, ws, {}, proxyOptions);
+  dbg("enter-project-chat", `files ok=${filesRes.ok} data=${JSON.stringify(filesRes.data).slice(0, 500)}`);
+
+  if (filesRes.ok && filesRes.data?.data) {
+    const files = filesRes.data.data.files || filesRes.data.data || [];
+    // Try reading first non-empty file
+    if (Array.isArray(files) && files.length > 0) {
+      for (const f of files) {
+        const filePath = f.path || f.name || f.file_path || "";
+        if (!filePath) continue;
+        const fileRes = await apiFetch(`/projects/${projectId}/files/${encodeURIComponent(filePath)}`, token, ws, {}, proxyOptions);
+        dbg("enter-project-chat", `file "${filePath}" ok=${fileRes.ok} data=${JSON.stringify(fileRes.data).slice(0, 300)}`);
+        const content = fileRes.data?.data?.content || fileRes.data?.content || "";
         if (content) {
           assistantContent = content;
-          break;
-        }
-      }
-      // Try nested messages in turn
-      if (turn.messages && Array.isArray(turn.messages)) {
-        const assistMsg = turn.messages.find((m) => m.role === "assistant");
-        if (assistMsg?.content) {
-          assistantContent = assistMsg.content;
           break;
         }
       }
     }
   }
 
+  // Fallback: try thread/turns/{id} (single turn detail) or stream replay
+  if (assistantContent === chatName && turn?.id) {
+    const turnDetailRes = await apiFetch(`/projects/${projectId}/thread/turns/${turn.id}`, token, ws, {}, proxyOptions);
+    dbg("enter-project-chat", `turn detail ok=${turnDetailRes.ok} data=${JSON.stringify(turnDetailRes.data).slice(0, 500)}`);
+    const detail = turnDetailRes.data?.data;
+    if (detail) {
+      const content = detail.content || detail.text || detail.message || detail.output || "";
+      if (content) assistantContent = typeof content === "string" ? content : JSON.stringify(content);
+    }
+  }
+
   // Step 4: Format as OpenAI-compatible response
+  const completionId = `chatcmpl-ec-${projectId}`;
+  const created = Math.floor(Date.now() / 1000);
+  const isStream = body?.stream === true;
+
+  if (isStream) {
+    // SSE format: single delta chunk + [DONE]
+    const chunk = {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: "assistant", content: assistantContent }, finish_reason: null }],
+    };
+    const doneChunk = {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    };
+    const sseBody = `data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(doneChunk)}\n\ndata: [DONE]\n\n`;
+    const syntheticResponse = new Response(sseBody, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    });
+    return { response: syntheticResponse };
+  }
+
+  // Non-streaming: plain JSON
   const responseBody = {
-    id: `chatcmpl-ec-${projectId}`,
+    id: completionId,
     object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
+    created,
     model,
     choices: [
       {
@@ -334,7 +378,6 @@ export async function executeProjectChat({ model, body, credentials, proxyOption
     usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
 
-  // Return as a synthetic Response object (matches what BaseExecutor expects)
   const syntheticResponse = new Response(JSON.stringify(responseBody), {
     status: 200,
     headers: { "Content-Type": "application/json" },
