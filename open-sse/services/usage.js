@@ -14,6 +14,7 @@ import { getCodeBuddyCnUsage } from "./usage/codebuddy-cn.js";
 import { getGrokCliUsage } from "./usage/grok-cli.js";
 import { getEnterConvergeUsage } from "./usage/enter-converge.js";
 import { getUnikeyUsage } from "./usage/unikey.js";
+import { getTaskletUsage } from "./usage/tasklet.js";
 import {
   getQwenUsage,
   getIflowUsage,
@@ -49,6 +50,7 @@ const USAGE_HANDLERS = {
   "grok-cli": (c) => getGrokCliUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
   "enter-converge": (c) => getEnterConvergeUsage(c.apiKey, c.providerSpecificData, c.proxyOptions),
   unikey: (c) => getUnikeyUsage(c.apiKey, c.proxyOptions),
+  tasklet: (c) => getTaskletUsage(c.apiKey, c.providerSpecificData, c.proxyOptions),
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null) {

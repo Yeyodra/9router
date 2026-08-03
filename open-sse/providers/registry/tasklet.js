@@ -18,6 +18,7 @@ export default {
     baseUrl: "https://api.tasklet.ai/api/sendChatMessage",
     format: "openai",
   },
+  features: { usage: true, usageApikey: true },
   models: [
     // Claude
     { id: "claude-haiku-4.5", name: "Claude Haiku 4.5" },
