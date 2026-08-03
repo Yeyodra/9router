@@ -39,7 +39,7 @@ def probe(row, model):
     except urllib.error.HTTPError as e:
         text, status = e.read(1000).decode(errors="replace"), e.code
     except Exception as e:
-        return account_id, "unknown", f"{type(e).__name__}: {e}"
+        return account_id, "outage", f"{type(e).__name__}: {e}"
     low = text.lower()
     if status == 402 and "insufficient build credits" in low:
         return account_id, "402", text[:200]
@@ -97,13 +97,13 @@ def main():
 
     first, rest = rows[:a.canary], rows[a.canary:]
     results = run(first)
-    outages = sum(kind == "502" for _, kind, _ in results)
-    if outages >= max(3, (len(first) + 1) // 2):
-        print(f"ABORT: circuit breaker ({outages}/{len(first)} canaries returned 5xx)", file=sys.stderr)
+    outages = sum(kind in ("502", "outage") for _, kind, _ in results)
+    if outages >= (len(first) + 1) // 2:
+        print(f"ABORT: circuit breaker ({outages}/{len(first)} canaries failed upstream)", file=sys.stderr)
         return 2
     results += run(rest)
 
-    counts = {k: sum(kind == k for _, kind, _ in results) for k in ("healthy", "402", "502", "unknown")}
+    counts = {k: sum(kind == k for _, kind, _ in results) for k in ("healthy", "402", "502", "outage", "unknown")}
     print("results " + " ".join(f"{k}={v}" for k, v in counts.items()), flush=True)
     if a.dry_run:
         print("dry-run: DB unchanged")

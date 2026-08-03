@@ -231,7 +231,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     shouldFallback = true;
     cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
-  } else if (status === 402 && (provider === "enter-converge" || provider === "ec")) {
+  } else if (model && status === 402 && (provider === "enter-converge" || provider === "ec")) {
     // Enter Converge 402 = permanent model lock (credit exhausted for this model)
     shouldFallback = true;
     cooldownMs = 10 * 365 * 24 * 60 * 60 * 1000; // ~10 years = permanent
