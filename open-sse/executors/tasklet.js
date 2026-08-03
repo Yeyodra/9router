@@ -97,11 +97,15 @@ function collectWsResponse(sessionToken, agentId, signal, timeoutMs = 120000) {
           }
         }
 
-        if (msg.type === "syncUpdate" && msg.state?.runState?.type === "idle") {
-          if (!done) {
-            done = true; clearTimeout(timeout); ws.close();
-            if (!content) reject(new Error("QUOTA_EXHAUSTED"));
-            else resolve({ content, thinking });
+        if (msg.type === "syncUpdate") {
+          const runType = msg.state?.runState?.type;
+          if (runType === "idle" || runType === "error") {
+            if (!done) {
+              done = true; clearTimeout(timeout); ws.close();
+              if (runType === "error") reject(new Error(msg.state.runState.error || "QUOTA_EXHAUSTED"));
+              else if (!content) reject(new Error("QUOTA_EXHAUSTED"));
+              else resolve({ content, thinking });
+            }
           }
         }
       } catch { /* ignore */ }
@@ -189,11 +193,13 @@ async function* streamWsTokens(sessionToken, agentId, signal, timeoutMs = 120000
       }
 
       if (msg.type === "syncUpdate") {
-        if (msg.state?.runState?.type === "idle") {
+        const runType = msg.state?.runState?.type;
+        if (runType === "idle" || runType === "error") {
           done = true; cleanup(); ws.close();
-          if (!lastContent) { error = "QUOTA_EXHAUSTED"; }
+          if (runType === "error") error = msg.state.runState.error || "QUOTA_EXHAUSTED";
+          else if (!lastContent) error = "QUOTA_EXHAUSTED";
           enqueue(null);
-        } else {
+        } else if (runType === "running") {
           enqueue({ keepalive: true });
         }
       }
@@ -393,10 +399,10 @@ export class TaskletExecutor extends BaseExecutor {
       return { response: finalResponse, url: `${TASKLET_API}/api/sendChatMessage`, headers, transformedBody: taskletPayload };
     } catch (err) {
       if (err.name === "AbortError") throw err;
-      if (err.message === "QUOTA_EXHAUSTED") {
-        log?.warn?.("TASKLET", `Account quota exhausted — no content produced`);
+      if (err.message === "QUOTA_EXHAUSTED" || err.message.includes("credits")) {
+        log?.warn?.("TASKLET", `Account quota exhausted: ${err.message}`);
         const errResp = new Response(JSON.stringify({
-          error: { message: "Tasklet account quota exhausted", type: "insufficient_quota", code: "insufficient_quota" },
+          error: { message: err.message, type: "insufficient_quota", code: "insufficient_quota" },
         }), { status: 429, headers: { "Content-Type": "application/json" } });
         return { response: errResp, url: `${TASKLET_API}/api/sendChatMessage`, headers, transformedBody: taskletPayload };
       }
